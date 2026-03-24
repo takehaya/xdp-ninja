@@ -41,8 +41,8 @@ send_packets() {
 }
 
 require_bpftool() {
-    if ! command -v bpftool &>/dev/null; then
-        echo "bpftool not available, skipping" >&2
+    if ! bpftool prog show &>/dev/null; then
+        echo "skipping: bpftool not working" >&2
         return 1
     fi
 }
@@ -139,7 +139,7 @@ test_prog_id() {
 }
 
 test_tailcall_dispatcher() {
-    # tail call チェーン (dispatcher → prog_a) の dispatcher に -p でアタッチ
+    require_bpftool || return 1
     "$SCRIPT_DIR/cleanup_tailcall.sh" 2>/dev/null || true
     local setup_out
     setup_out=$("$SCRIPT_DIR/setup_tailcall.sh" 2>&1)
