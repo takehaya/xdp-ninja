@@ -134,4 +134,4 @@ $RECYCLE.BIN/
 
 # Undo overly broad rules above that catch Go project files
 !go.mod
-!cmd/*CLAUDE.md
+!cmd/*
