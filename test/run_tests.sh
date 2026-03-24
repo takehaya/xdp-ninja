@@ -10,15 +10,21 @@ FAIL=0
 red()   { echo -e "\033[31m$*\033[0m"; }
 green() { echo -e "\033[32m$*\033[0m"; }
 
+SKIP=0
+
 run_test() {
     local name="$1"
     shift
     echo -n "  $name ... "
     local output
     output=$("$@" 2>&1)
-    if [[ $? -eq 0 ]]; then
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
         green "PASS"
         PASS=$((PASS + 1))
+    elif echo "$output" | grep -q "skipping"; then
+        echo "SKIP"
+        SKIP=$((SKIP + 1))
     else
         red "FAIL"
         if [[ -n "$output" ]]; then
@@ -32,6 +38,13 @@ run_test() {
 
 send_packets() {
     ip netns exec xdptest ping -c "$1" -W 1 10.0.0.1 >/dev/null 2>&1 || true
+}
+
+require_bpftool() {
+    if ! command -v bpftool &>/dev/null; then
+        echo "bpftool not available, skipping" >&2
+        return 1
+    fi
 }
 
 capture_count() {
@@ -106,7 +119,7 @@ test_pcap_output() {
 }
 
 test_prog_id() {
-    # -p <prog_id> でアタッチできること
+    require_bpftool || return 1
     local prog_id=$(bpftool prog show name xdp_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
     if [[ -z "$prog_id" ]]; then
         echo "bpftool could not find xdp_pass" >&2
@@ -151,7 +164,7 @@ test_tailcall_dispatcher() {
 }
 
 test_graceful_shutdown() {
-    # xdp-ninja 終了後も元のXDPプログラムが残っていること
+    require_bpftool || return 1
     local prog_id_before=$(bpftool prog show name xdp_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
 
     timeout 5 "$BINARY" -i veth0 -c 1 > /dev/null 2>/dev/null &
@@ -194,5 +207,5 @@ echo "Cleaning up..."
 "$SCRIPT_DIR/cleanup.sh" 2>/dev/null || true
 
 echo ""
-echo "Results: $(green "$PASS passed"), $(red "$FAIL failed")"
+echo "Results: $(green "$PASS passed"), $(red "$FAIL failed"), $SKIP skipped"
 [[ $FAIL -eq 0 ]]
