@@ -18,7 +18,7 @@ make build
 veth pair + ダミーXDPプログラムを作成:
 
 ```bash
-sudo test/setup.sh
+sudo scripts/test/setup.sh
 ```
 
 確認:
@@ -171,16 +171,16 @@ sudo ip netns exec xdptest ping -c 3 10.0.0.1
 ## 4. クリーンアップ
 
 ```bash
-sudo test/cleanup.sh
+sudo scripts/test/cleanup.sh
 ```
 
 ## トラブルシューティング
 
 ### `no XDP program attached to veth0`
-→ `sudo test/setup.sh` を実行してダミーXDPプログラムをアタッチしてください。
+→ `sudo scripts/test/setup.sh` を実行してダミーXDPプログラムをアタッチしてください。
 
 ### `retrieve BTF ID: not supported`
-→ ダミーXDPプログラムにBTFがない。`test/setup.sh` は `-g` 付きでコンパイルするので、再実行してください。
+→ ダミーXDPプログラムにBTFがない。`scripts/test/setup.sh` は `-g` 付きでコンパイルするので、再実行してください。
 
 ### `permission denied` (BPFロード時)
 → `sudo` で実行してください。または `CAP_BPF` + `CAP_NET_ADMIN` を付与。
