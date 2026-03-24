@@ -18,7 +18,7 @@ test-bpf:
 		go test -v -count 1 -timeout 5m ./internal/program/ -run TestBpf
 
 test-integration: build
-	sudo test/run_tests.sh
+	sudo scripts/test/run_tests.sh
 
 test-all: test-unit test-bpf test-integration
 

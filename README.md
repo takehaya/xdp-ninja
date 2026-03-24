@@ -126,7 +126,7 @@ End-to-end tests using a veth pair and a dummy XDP program. Requires root, clang
 make test-integration
 ```
 
-This runs `test/run_tests.sh` which:
+This runs `scripts/test/run_tests.sh` which:
 1. Creates a veth pair with a dummy XDP program
 2. Tests entry/exit capture, filters, pcap output, graceful shutdown
 3. Cleans up the veth pair

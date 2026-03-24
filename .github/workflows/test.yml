@@ -51,4 +51,4 @@ jobs:
         run: go build -o xdp-ninja ./cmd/xdp-ninja/
 
       - name: Integration Tests
-        run: sudo test/run_tests.sh
+        run: sudo scripts/test/run_tests.sh
