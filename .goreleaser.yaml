@@ -9,7 +9,7 @@ builds:
     binary: xdp-ninja
     main: ./cmd/xdp-ninja
     goos: [linux]
-    goarch: [amd64, arm64]
+    goarch: [amd64]
 archives:
   - id: xdp-ninja
     formats: ['tar.gz']
