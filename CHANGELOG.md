@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0](https://github.com/takehaya/xdp-ninja/compare/v0.1.1...v0.2.0) (2026-03-24)
+
+
+### 🎉 Features
+
+* add install script for one-liner installation ([42643ff](https://github.com/takehaya/xdp-ninja/commit/42643ffb0696c9d600f494966e1c0248dac3a49c))
+
+
+### 🐛 Bug Fixes
+
+* correct project root path in run_tests.sh after move to scripts/test/ ([1ed7844](https://github.com/takehaya/xdp-ninja/commit/1ed78444062782d5e07288b923f2c8f105968f80))
+
+
+### 📝 Documentation
+
+* note jq requirement for install script ([82a38cc](https://github.com/takehaya/xdp-ninja/commit/82a38cc63f3dd8299697040a98ba2f1dbea801e7))
+
+
+### ♻️ Code Refactoring
+
+* move test/ to scripts/test/ ([a8aed03](https://github.com/takehaya/xdp-ninja/commit/a8aed034808a9baa594056afc3d06a0452ebbb21))
+
 ## [0.1.1](https://github.com/takehaya/xdp-ninja/compare/v0.1.0...v0.1.1) (2026-03-24)
 
 
