@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/takehaya/xdp-ninja/compare/v0.1.0...v0.1.1) (2026-03-24)
+
+
+### 🐛 Bug Fixes
+
+* remove arm64 from goreleaser (CGO cross-compile not available) ([6ca90f7](https://github.com/takehaya/xdp-ninja/commit/6ca90f7340766b65991e29e1718f00e2e889a26e))
+
 ## [0.1.0](https://github.com/takehaya/xdp-ninja/compare/v0.0.1...v0.1.0) (2026-03-24)
 
 
