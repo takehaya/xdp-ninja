@@ -40,7 +40,11 @@ jobs:
           go-version-file: go.mod
 
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev clang tcpdump gcc-multilib
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libpcap-dev clang tcpdump gcc-multilib linux-tools-common linux-tools-$(uname -r) || true
+          # Fallback: install bpftool from linux-tools-generic if kernel-specific package unavailable
+          sudo apt-get install -y linux-tools-generic || true
 
       - name: Build
         run: go build -o xdp-ninja ./cmd/xdp-ninja/
