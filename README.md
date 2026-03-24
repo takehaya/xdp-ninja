@@ -5,18 +5,20 @@ xdp-ninja is a tool that captures packets before or after XDP processing, withou
 ## Install
 
 ```bash
+# One-liner (downloads pre-built binary from GitHub Releases)
+curl -fsSL https://raw.githubusercontent.com/takehaya/xdp-ninja/main/scripts/install.sh | sudo bash
+
+# Specific version
+curl -fsSL https://raw.githubusercontent.com/takehaya/xdp-ninja/main/scripts/install.sh | sudo bash -s -- --version v0.1.0
+
+# Or via go install (requires Go + libpcap-dev)
 go install github.com/takehaya/xdp-ninja/cmd/xdp-ninja@latest
-```
 
-Or build from source:
-
-```bash
+# Or build from source
 git clone https://github.com/takehaya/xdp-ninja.git
 cd xdp-ninja
 make build
 ```
-
-Requires: Go 1.21+, libpcap-dev (`sudo apt install libpcap-dev`)
 
 It uses BPF trampoline (fentry/fexit) to non-invasively trace the target XDP program. Optionally, a tcpdump-style filter is compiled to eBPF via cbpfc and executed in the kernel, so only matching packets are sent to userspace.
 
