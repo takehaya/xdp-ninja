@@ -14,11 +14,16 @@ run_test() {
     local name="$1"
     shift
     echo -n "  $name ... "
-    if "$@"; then
+    local output
+    output=$("$@" 2>&1)
+    if [[ $? -eq 0 ]]; then
         green "PASS"
         PASS=$((PASS + 1))
     else
         red "FAIL"
+        if [[ -n "$output" ]]; then
+            echo "    debug: $output"
+        fi
         FAIL=$((FAIL + 1))
     fi
 }
@@ -103,7 +108,10 @@ test_pcap_output() {
 test_prog_id() {
     # -p <prog_id> でアタッチできること
     local prog_id=$(bpftool prog show name xdp_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
-    [[ -z "$prog_id" ]] && return 1
+    if [[ -z "$prog_id" ]]; then
+        echo "bpftool could not find xdp_pass" >&2
+        return 1
+    fi
 
     local err=$(mktemp)
     timeout 10 "$BINARY" -p "$prog_id" -c 3 > /dev/null 2>"$err" &
@@ -112,6 +120,7 @@ test_prog_id() {
     send_packets 5
     wait $pid 2>/dev/null || true
     local count=$(capture_count "$err")
+    echo "prog_id=$prog_id count=$count stderr=$(cat "$err")" >&2
     rm -f "$err"
     [[ "$count" -ge 3 ]]
 }
@@ -119,9 +128,14 @@ test_prog_id() {
 test_tailcall_dispatcher() {
     # tail call チェーン (dispatcher → prog_a) の dispatcher に -p でアタッチ
     "$SCRIPT_DIR/cleanup_tailcall.sh" 2>/dev/null || true
-    local disp_id
-    disp_id=$("$SCRIPT_DIR/setup_tailcall.sh" 2>/dev/null)
-    [[ -z "$disp_id" ]] && return 1
+    local setup_out
+    setup_out=$("$SCRIPT_DIR/setup_tailcall.sh" 2>&1)
+    local disp_id=$(echo "$setup_out" | tail -1)
+    if [[ -z "$disp_id" || ! "$disp_id" =~ ^[0-9]+$ ]]; then
+        echo "setup_tailcall failed: $setup_out" >&2
+        "$SCRIPT_DIR/cleanup_tailcall.sh" 2>/dev/null || true
+        return 1
+    fi
 
     local err=$(mktemp)
     timeout 10 "$BINARY" -p "$disp_id" -c 3 > /dev/null 2>"$err" &
@@ -130,6 +144,7 @@ test_tailcall_dispatcher() {
     ip netns exec xdptctest ping -c 5 -W 1 10.98.0.1 >/dev/null 2>&1 || true
     wait $pid 2>/dev/null || true
     local count=$(capture_count "$err")
+    echo "disp_id=$disp_id count=$count stderr=$(cat "$err")" >&2
     rm -f "$err"
     "$SCRIPT_DIR/cleanup_tailcall.sh" 2>/dev/null || true
     [[ "$count" -ge 3 ]]
@@ -146,6 +161,7 @@ test_graceful_shutdown() {
     wait $pid 2>/dev/null || true
 
     local prog_id_after=$(bpftool prog show name xdp_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
+    echo "before=$prog_id_before after=$prog_id_after" >&2
     [[ -n "$prog_id_after" && "$prog_id_before" == "$prog_id_after" ]]
 }
 
