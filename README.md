@@ -5,7 +5,7 @@ xdp-ninja is a tool that captures packets before or after XDP processing, withou
 ## Install
 
 ```bash
-# One-liner (downloads pre-built binary from GitHub Releases)
+# One-liner (downloads pre-built binary from GitHub Releases, requires jq)
 curl -fsSL https://raw.githubusercontent.com/takehaya/xdp-ninja/main/scripts/install.sh | sudo bash
 
 # Specific version
