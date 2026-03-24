@@ -1,0 +1,38 @@
+version: 2
+env:
+  - CGO_ENABLED=1
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: xdp-ninja
+    binary: xdp-ninja
+    main: ./cmd/xdp-ninja
+    goos: [linux]
+    goarch: [amd64, arm64]
+archives:
+  - id: xdp-ninja
+    formats: ['tar.gz']
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+release:
+  github:
+    owner: takehaya
+    name: xdp-ninja
+  draft: false
+  prerelease: auto
