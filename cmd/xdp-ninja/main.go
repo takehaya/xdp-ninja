@@ -17,6 +17,14 @@ import (
 	"github.com/takehaya/xdp-ninja/internal/program"
 )
 
+// Set via -ldflags "-X main.version=... -X main.commit=... -X main.date=... -X main.builtBy=..."
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+	builtBy = "unknown"
+)
+
 var flags = []cli.Flag{
 	&cli.StringFlag{
 		Name: "interface", Aliases: []string{"i"},
@@ -47,6 +55,7 @@ var flags = []cli.Flag{
 func main() {
 	app := &cli.Command{
 		Name:      "xdp-ninja",
+		Version:   fmt.Sprintf("%s, commit %s, built at %s, built by %s", version, commit, date, builtBy),
 		Usage:     "capture packets before or after XDP processing",
 		ArgsUsage: "[filter expression]",
 		Description: `Outputs pcap (pcapng) to stdout. Pipe to tcpdump, wireshark, etc.
