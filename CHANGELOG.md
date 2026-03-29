@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/takehaya/xdp-ninja/compare/v0.2.0...v0.3.0) (2026-03-29)
+
+
+### 🎉 Features
+
+* add --version flag ([aad7541](https://github.com/takehaya/xdp-ninja/commit/aad754152a6ea254a684e4198bc947028b1c745e))
+* add --version flag Set via -ldflags "-X main.version=X.Y.Z" at build time. Defaults to "dev" for development builds. ([33b16f5](https://github.com/takehaya/xdp-ninja/commit/33b16f5fedbb8d180785f5622b91452cdf502b02))
+
+
+### 🔧 Miscellaneous Chores
+
+* add goreleaser snapshot target to Makefile ([91a52fb](https://github.com/takehaya/xdp-ninja/commit/91a52fb8c19e1a9f73af8d0936169640a4cddc6e))
+
 ## [0.2.0](https://github.com/takehaya/xdp-ninja/compare/v0.1.0...v0.2.0) (2026-03-29)
 
 
