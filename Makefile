@@ -1,4 +1,4 @@
-.PHONY: build clean test test-unit test-bpf test-integration test-all vet
+.PHONY: build clean test test-unit test-bpf test-integration test-all vet goreleaser
 
 BINARY = xdp-ninja
 
@@ -21,6 +21,9 @@ test-integration: build
 	sudo scripts/test/run_tests.sh
 
 test-all: test-unit test-bpf test-integration
+
+goreleaser: ## build with goreleaser
+	goreleaser release --snapshot --clean
 
 clean:
 	rm -f $(BINARY)
