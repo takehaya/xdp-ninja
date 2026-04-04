@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/takehaya/xdp-ninja/compare/v0.4.0...v0.5.0) (2026-04-04)
+
+
+### 🎉 Features
+
+* add --func, --list-funcs, --list-progs for __noinline subfunction probing ([cd7cb27](https://github.com/takehaya/xdp-ninja/commit/cd7cb27ef0041d78484c6113c4da144625db655b))
+* add --func/--list-funcs/--list-progs for __noinline subfunction probing ([15484b1](https://github.com/takehaya/xdp-ninja/commit/15484b1341420a0f3a9151ab55025578342ae530))
+
+
+### 🐛 Bug Fixes
+
+* address Copilot review feedback on error handling, safety, and docs ([b8d42a2](https://github.com/takehaya/xdp-ninja/commit/b8d42a2af87eccf3127e188c5f403a0008eec054))
+
+
+### 📝 Documentation
+
+* add manual test guide for --func and tail call probing (ja/en) ([27013ba](https://github.com/takehaya/xdp-ninja/commit/27013ba9141580fc82476cc28e75a5661a968392))
+
+
+### 🔧 Miscellaneous Chores
+
+* add lefthook pre-commit hooks and conventional commit check ([95205a4](https://github.com/takehaya/xdp-ninja/commit/95205a4fd39d325ace8f18bc7b8f0b6306ece525))
+* add lefthook pre-commit, golangci-lint errcheck, and lint CI workflow ([4f0f934](https://github.com/takehaya/xdp-ninja/commit/4f0f93452362364aa22011a9aecc738b77a2e6e6))
+
 ## [0.4.0](https://github.com/takehaya/xdp-ninja/compare/v0.3.0...v0.4.0) (2026-03-30)
 
 
