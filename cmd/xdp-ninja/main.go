@@ -46,6 +46,18 @@ var flags = []cli.Flag{
 		Name: "count", Aliases: []string{"c"},
 		Usage: "exit after capturing N packets (0 = unlimited)",
 	},
+	&cli.StringFlag{
+		Name:  "func",
+		Usage: "attach to a specific __noinline subfunction (by BTF name) instead of the entry function",
+	},
+	&cli.BoolFlag{
+		Name:  "list-funcs",
+		Usage: "list available BTF functions in the target program and exit",
+	},
+	&cli.BoolFlag{
+		Name:  "list-progs",
+		Usage: "list tail call targets reachable from the target program and exit",
+	},
 	&cli.BoolFlag{
 		Name: "verbose", Aliases: []string{"v"},
 		Usage: "verbose output to stderr",
@@ -98,7 +110,43 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer info.Program.Close()
+	defer func() { _ = info.Program.Close() }()
+
+	// --list-progs: show tail call targets, then exit
+	if cmd.Bool("list-progs") {
+		fmt.Fprintf(os.Stderr, "id=%-6d %s\n", info.ProgID, info.FuncName)
+
+		targets, err := attach.ListTailCallTargets(info.Program)
+		if err != nil {
+			return err
+		}
+		for _, t := range targets {
+			fmt.Fprintf(os.Stderr, "id=%-6d %s (tailcall[%d])\n", t.ProgID, t.ProgName, t.Index)
+		}
+		return nil
+	}
+
+	// --list-funcs: print available BTF functions and exit
+	if cmd.Bool("list-funcs") {
+		funcs, err := attach.ListFuncs(info.Program)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "BTF functions in program (id=%d):\n", info.ProgID)
+		for _, f := range funcs {
+			fmt.Fprintf(os.Stderr, "  %-40s [%s]\n", f.Name, f.Linkage)
+		}
+		return nil
+	}
+
+	// --func: override target function name
+	if funcName := cmd.String("func"); funcName != "" {
+		if err := attach.ValidateSubfunc(info.Program, info.ProgID, funcName); err != nil {
+			return err
+		}
+		logVerbose(cmd, "overriding entry function with --func %q", funcName)
+		info.FuncName = funcName
+	}
 
 	filterExpr := strings.Join(cmd.Args().Slice(), " ")
 	logVerbose(cmd, "found XDP program %q (id=%d)", info.FuncName, info.ProgID)
@@ -110,19 +158,27 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer probe.Close()
+	defer func() {
+		if cerr := probe.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: closing probe: %v\n", cerr)
+		}
+	}()
 
 	writer, err := output.NewWriter(cmd.String("write"), mode)
 	if err != nil {
 		return err
 	}
-	defer writer.Close()
+	defer func() {
+		if cerr := writer.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: closing writer: %v\n", cerr)
+		}
+	}()
 
 	reader, err := capture.NewReader(probe.EventsMap, 256*1024)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	label := fmt.Sprintf("prog %q id=%d", info.FuncName, info.ProgID)
 	if info.IfaceName != "" {
@@ -164,7 +220,7 @@ func captureLoop(cmd *cli.Command, reader *capture.Reader, writer *output.Writer
 
 	go func() {
 		<-sig
-		reader.Close()
+		_ = reader.Close()
 	}()
 
 	count := int(cmd.Int("count"))
