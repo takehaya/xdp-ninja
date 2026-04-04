@@ -1,12 +1,27 @@
 .PHONY: build clean test test-unit test-bpf test-integration test-all vet goreleaser
+.PHONY: install-lint-tools lint lint-ci
 
 BINARY = xdp-ninja
+DIFF_FROM_BRANCH_NAME ?= main
 
 build:
 	go build -o $(BINARY) ./cmd/xdp-ninja/
 
 vet:
 	go vet ./...
+
+## Lint:
+
+install-lint-tools: ## install lint tools
+	./scripts/install_lint_tools.sh
+
+lint: ## Run lefthook pre-commit on all files
+	lefthook run pre-commit --all-files
+
+lint-ci: ## Run lefthook pre-commit on changed files (for CI)
+	@if ! git diff --quiet $(DIFF_FROM_BRANCH_NAME) HEAD; then \
+		git diff --name-only -z $(DIFF_FROM_BRANCH_NAME) HEAD | xargs -0 lefthook run pre-commit --file; \
+	fi
 
 test: test-unit
 
