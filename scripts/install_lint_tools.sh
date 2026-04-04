@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/libs/install_utils.sh"
 
 mkdir -p "${HOME}/.local/bin"
+export GOBIN="${HOME}/.local/bin"
+export PATH="${GOBIN}:${PATH}"
 
 echo "Updating package list..."
 sudo apt-get update -qq

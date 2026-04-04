@@ -62,6 +62,7 @@ sudo xdp-ninja -i eth0 --mode exit | tcpdump -n -r -
 | `--mode` | `entry` (before XDP, default) or `exit` (after XDP) |
 | `--func` | Attach to a specific `__noinline` subfunction by BTF name |
 | `--list-funcs` | List available BTF functions in the target program and exit |
+| `--list-progs` | List tail call targets reachable from the target program and exit |
 | `-w, --write` | Write to pcap file instead of stdout |
 | `-c, --count` | Stop after N packets (0 = unlimited) |
 | `-v, --verbose` | Verbose output to stderr |
