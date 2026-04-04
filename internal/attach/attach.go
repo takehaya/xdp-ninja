@@ -93,13 +93,13 @@ func ListTailCallTargets(prog *ebpf.Program) ([]TailCallTarget, error) {
 	for _, mapID := range mapIDs {
 		m, err := ebpf.NewMapFromID(mapID)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("opening map %d: %w", mapID, err)
 		}
 
 		mapInfo, err := m.Info()
 		if err != nil {
 			_ = m.Close()
-			continue
+			return nil, fmt.Errorf("getting map %d info: %w", mapID, err)
 		}
 		if mapInfo.Type != ebpf.ProgramArray {
 			_ = m.Close()
@@ -113,13 +113,15 @@ func ListTailCallTargets(prog *ebpf.Program) ([]TailCallTarget, error) {
 			progID := val
 			targetProg, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
 			if err != nil {
-				continue
+				_ = m.Close()
+				return nil, fmt.Errorf("opening tail call target (id=%d): %w", progID, err)
 			}
 
 			targetInfo, err := targetProg.Info()
 			if err != nil {
 				_ = targetProg.Close()
-				continue
+				_ = m.Close()
+				return nil, fmt.Errorf("getting tail call target info (id=%d): %w", progID, err)
 			}
 
 			targets = append(targets, TailCallTarget{
@@ -128,6 +130,10 @@ func ListTailCallTargets(prog *ebpf.Program) ([]TailCallTarget, error) {
 				ProgName: targetInfo.Name,
 			})
 			_ = targetProg.Close()
+		}
+		if err := iter.Err(); err != nil {
+			_ = m.Close()
+			return nil, fmt.Errorf("iterating program array map %d: %w", mapID, err)
 		}
 		_ = m.Close()
 	}
@@ -178,7 +184,10 @@ func ValidateSubfunc(prog *ebpf.Program, progID uint32, funcName string) error {
 		return nil
 	}
 
-	funcs, _ := ListFuncsFromSpec(spec)
+	funcs, ferr := ListFuncsFromSpec(spec)
+	if ferr != nil {
+		return fmt.Errorf("function %q not found in program (id=%d) BTF (also failed to list functions: %v)", funcName, progID, ferr)
+	}
 	var names []string
 	for _, f := range funcs {
 		names = append(names, f.Name)

@@ -15,7 +15,7 @@ install_tool() {
     fi
 
     echo "Installing $tool..."
-    eval ${install_cmd}
+    bash -lc "$install_cmd"
     if command_exists "$tool"; then
         echo "  $tool installed successfully"
         return 0

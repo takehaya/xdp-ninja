@@ -53,7 +53,7 @@ jobs:
         run: |
           FILES=$(git diff --name-only "${{ github.event.before }}" HEAD | tr '\n' ' ')
           if [[ -n "$FILES" ]]; then
-            lefthook run pre-commit --file $FILES
+            lefthook run pre-commit --file "$FILES"
           fi
 
       - name: Run lefthook (pull_request)

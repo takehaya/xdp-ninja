@@ -19,9 +19,8 @@ lint: ## Run lefthook pre-commit on all files
 	lefthook run pre-commit --all-files
 
 lint-ci: ## Run lefthook pre-commit on changed files (for CI)
-	FILES="$$(git diff --name-only $(DIFF_FROM_BRANCH_NAME) HEAD | tr '\n' ' ')"; \
-	if [ -n "$$FILES" ]; then \
-		lefthook run pre-commit --file $$FILES; \
+	@if ! git diff --quiet $(DIFF_FROM_BRANCH_NAME) HEAD; then \
+		git diff --name-only -z $(DIFF_FROM_BRANCH_NAME) HEAD | xargs -0 lefthook run pre-commit --file; \
 	fi
 
 test: test-unit
