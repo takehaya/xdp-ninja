@@ -247,7 +247,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	if info.IfaceName != "" {
 		label = fmt.Sprintf("%s on %s", label, info.IfaceName)
 	}
-	fmt.Fprintf(os.Stderr, "capturing (%s, mode=%s)...\n", label, mode) // mode kept for display
+	fmt.Fprintf(os.Stderr, "capturing (%s, mode=%s)...\n", label, mode)
 
 	return captureLoop(cmd, reader, writer)
 }

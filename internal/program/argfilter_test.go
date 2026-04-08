@@ -104,141 +104,47 @@ func TestArgFilter(t *testing.T) {
 		t.Logf("received %d events (no filter)", count)
 	})
 
-	t.Run("exact_match_hit", func(t *testing.T) {
-		// filter_id=42 should match
-		filters := []filter.ArgFilter{{
+	// makeFilter builds a single-element ArgFilter slice from filterIDParam.
+	makeFilter := func(op filter.ArgFilterOp, value uint64, maxValue ...uint64) []filter.ArgFilter {
+		f := filter.ArgFilter{
 			ParamName:  "filter_id",
 			ParamIndex: filterIDParam.Index,
 			ParamSize:  filterIDParam.Size,
 			Signed:     filterIDParam.Signed,
-			Op:         filter.OpEqual,
-			Value:      42,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count == 0 {
-			t.Fatal("expected events with matching filter (filter_id=42), got 0")
+			Op:         op,
+			Value:      value,
 		}
-		t.Logf("received %d events (filter_id=42)", count)
-	})
+		if len(maxValue) > 0 {
+			f.MaxValue = maxValue[0]
+		}
+		return []filter.ArgFilter{f}
+	}
 
-	t.Run("exact_match_miss", func(t *testing.T) {
-		// filter_id=99 should not match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpEqual,
-			Value:      99,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count != 0 {
-			t.Fatalf("expected 0 events with non-matching filter (filter_id=99), got %d", count)
-		}
-		t.Logf("received %d events (filter_id=99, expected 0)", count)
-	})
+	tests := []struct {
+		name    string
+		filters []filter.ArgFilter
+		wantHit bool // true = expect events, false = expect 0
+	}{
+		{"exact_match_hit", makeFilter(filter.OpEqual, 42), true},
+		{"exact_match_miss", makeFilter(filter.OpEqual, 99), false},
+		{"range_hit", makeFilter(filter.OpRange, 40, 50), true},
+		{"range_miss", makeFilter(filter.OpRange, 100, 200), false},
+		{"greater_equal_hit", makeFilter(filter.OpGreaterEqual, 40), true},
+		{"greater_equal_miss", makeFilter(filter.OpGreaterEqual, 100), false},
+		{"less_equal_hit", makeFilter(filter.OpLessEqual, 50), true},
+		{"less_equal_miss", makeFilter(filter.OpLessEqual, 10), false},
+	}
 
-	t.Run("range_hit", func(t *testing.T) {
-		// filter_id=40..50 should match (42 is in range)
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpRange,
-			Value:      40,
-			MaxValue:   50,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count == 0 {
-			t.Fatal("expected events with range filter (filter_id=40..50), got 0")
-		}
-		t.Logf("received %d events (filter_id=40..50)", count)
-	})
-
-	t.Run("range_miss", func(t *testing.T) {
-		// filter_id=100..200 should not match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpRange,
-			Value:      100,
-			MaxValue:   200,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count != 0 {
-			t.Fatalf("expected 0 events with non-matching range filter (filter_id=100..200), got %d", count)
-		}
-		t.Logf("received %d events (filter_id=100..200, expected 0)", count)
-	})
-
-	t.Run("greater_equal_hit", func(t *testing.T) {
-		// filter_id>=40 should match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpGreaterEqual,
-			Value:      40,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count == 0 {
-			t.Fatal("expected events with >= filter (filter_id>=40), got 0")
-		}
-		t.Logf("received %d events (filter_id>=40)", count)
-	})
-
-	t.Run("greater_equal_miss", func(t *testing.T) {
-		// filter_id>=100 should not match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpGreaterEqual,
-			Value:      100,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count != 0 {
-			t.Fatalf("expected 0 events with >= filter (filter_id>=100), got %d", count)
-		}
-		t.Logf("received %d events (filter_id>=100, expected 0)", count)
-	})
-
-	t.Run("less_equal_hit", func(t *testing.T) {
-		// filter_id<=50 should match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpLessEqual,
-			Value:      50,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count == 0 {
-			t.Fatal("expected events with <= filter (filter_id<=50), got 0")
-		}
-		t.Logf("received %d events (filter_id<=50)", count)
-	})
-
-	t.Run("less_equal_miss", func(t *testing.T) {
-		// filter_id<=10 should not match
-		filters := []filter.ArgFilter{{
-			ParamName:  "filter_id",
-			ParamIndex: filterIDParam.Index,
-			ParamSize:  filterIDParam.Size,
-			Signed:     filterIDParam.Signed,
-			Op:         filter.OpLessEqual,
-			Value:      10,
-		}}
-		count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, filters)
-		if count != 0 {
-			t.Fatalf("expected 0 events with <= filter (filter_id<=10), got %d", count)
-		}
-		t.Logf("received %d events (filter_id<=10, expected 0)", count)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			count := countArgFilterEvents(t, xdpProg, "process_with_id", iface, tt.filters)
+			if tt.wantHit && count == 0 {
+				t.Fatalf("expected events with filter %v, got 0", tt.filters[0].String())
+			}
+			if !tt.wantHit && count != 0 {
+				t.Fatalf("expected 0 events with filter %v, got %d", tt.filters[0].String(), count)
+			}
+			t.Logf("received %d events (%s)", count, tt.filters[0].String())
+		})
+	}
 }
