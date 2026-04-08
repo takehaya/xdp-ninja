@@ -95,9 +95,6 @@ func ParseArgFilter(expr string) (ParsedFilter, error) {
 	case "=":
 		if strings.Contains(valueStr, "..") {
 			parts := strings.SplitN(valueStr, "..", 2)
-			if len(parts) != 2 {
-				return ParsedFilter{}, fmt.Errorf("invalid range in %q: expected min..max", expr)
-			}
 			pf.Op = OpRange
 			v, err := parseValue(parts[0])
 			if err != nil {
