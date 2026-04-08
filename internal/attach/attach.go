@@ -147,6 +147,64 @@ type FuncInfo struct {
 	Linkage string // "static", "global", "extern"
 }
 
+// FuncParamInfo holds metadata about a function parameter from BTF.
+type FuncParamInfo struct {
+	Name   string // Parameter name from BTF
+	Index  int    // 0-based index in the parameter list
+	Size   uint32 // Size in bytes
+	Signed bool   // true if signed integer
+}
+
+// GetFuncParams returns the function parameters for the given function from BTF.
+// Only integer parameters (excluding the first xdp_md/xdp_buff pointer) are returned,
+// as those are the only types supported for argument filtering.
+func GetFuncParams(prog *ebpf.Program, funcName string) ([]FuncParamInfo, error) {
+	spec, err := btfSpec(prog)
+	if err != nil {
+		return nil, err
+	}
+	return GetFuncParamsFromSpec(spec, funcName)
+}
+
+// GetFuncParamsFromSpec extracts function parameters from a BTF spec.
+func GetFuncParamsFromSpec(spec *btf.Spec, funcName string) ([]FuncParamInfo, error) {
+	var fn *btf.Func
+	if err := spec.TypeByName(funcName, &fn); err != nil {
+		return nil, fmt.Errorf("function %q not found in BTF: %w", funcName, err)
+	}
+
+	proto, ok := fn.Type.(*btf.FuncProto)
+	if !ok {
+		return nil, fmt.Errorf("function %q has unexpected type %T (expected FuncProto)", funcName, fn.Type)
+	}
+
+	var params []FuncParamInfo
+	for i, p := range proto.Params {
+		// Skip first parameter (xdp_md/xdp_buff pointer)
+		if i == 0 {
+			continue
+		}
+
+		// Unwrap qualifiers and typedefs to get the underlying type
+		underlying := btf.UnderlyingType(p.Type)
+
+		// Only support integer types for filtering
+		intType, ok := underlying.(*btf.Int)
+		if !ok {
+			continue
+		}
+
+		params = append(params, FuncParamInfo{
+			Name:   p.Name,
+			Index:  i,
+			Size:   intType.Size,
+			Signed: intType.Encoding == btf.Signed,
+		})
+	}
+
+	return params, nil
+}
+
 // btfSpec opens the BTF handle for a loaded program and returns its spec.
 func btfSpec(prog *ebpf.Program) (*btf.Spec, error) {
 	handle, err := prog.Handle()
@@ -178,7 +236,11 @@ func ValidateSubfunc(prog *ebpf.Program, progID uint32, funcName string) error {
 	if err != nil {
 		return fmt.Errorf("program (id=%d): %w", progID, err)
 	}
+	return ValidateSubfuncFromSpec(spec, progID, funcName)
+}
 
+// ValidateSubfuncFromSpec validates a subfunction name against a BTF spec.
+func ValidateSubfuncFromSpec(spec *btf.Spec, progID uint32, funcName string) error {
 	var fn *btf.Func
 	if err := spec.TypeByName(funcName, &fn); err == nil {
 		return nil
@@ -233,15 +295,9 @@ func resolveEntryFunc(prog *ebpf.Program, progID uint32) (string, error) {
 	}
 	progName := info.Name
 
-	handle, err := prog.Handle()
+	spec, err := btfSpec(prog)
 	if err != nil {
-		return "", fmt.Errorf("program %q (id=%d): BTF unavailable (required for fentry/fexit): %w", progName, progID, err)
-	}
-	defer func() { _ = handle.Close() }()
-
-	spec, err := handle.Spec(nil)
-	if err != nil {
-		return "", fmt.Errorf("program %q (id=%d): reading BTF: %w", progName, progID, err)
+		return "", fmt.Errorf("program %q (id=%d): %w", progName, progID, err)
 	}
 
 	// 1. Exact match
