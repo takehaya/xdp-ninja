@@ -153,31 +153,33 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
-	// --func: override target function name
+	// --func: override target function name.
+	// Open BTF once and share across validation and parameter extraction.
 	funcName := cmd.String("func")
+	needParams := cmd.Bool("list-params") || len(cmd.StringSlice("arg-filter")) > 0
+	var params []attach.FuncParamInfo
 	if funcName != "" {
-		if err := attach.ValidateSubfunc(info.Program, info.ProgID, funcName); err != nil {
+		spec, err := attach.BTFSpec(info.Program)
+		if err != nil {
+			return fmt.Errorf("program (id=%d): %w", info.ProgID, err)
+		}
+		if err := attach.ValidateSubfuncFromSpec(spec, info.ProgID, funcName); err != nil {
 			return err
 		}
 		logVerbose(cmd, "overriding entry function with --func %q", funcName)
 		info.FuncName = funcName
-	}
 
-	// Resolve BTF params once for --list-params and --arg-filter (both require --func).
-	needParams := cmd.Bool("list-params") || len(cmd.StringSlice("arg-filter")) > 0
-	var params []attach.FuncParamInfo
-	if needParams {
-		if funcName == "" {
-			if cmd.Bool("list-params") {
-				return fmt.Errorf("--list-params requires --func")
+		if needParams {
+			params, err = attach.GetFuncParamsFromSpec(spec, funcName)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("--arg-filter requires --func")
 		}
-		var err error
-		params, err = attach.GetFuncParams(info.Program, funcName)
-		if err != nil {
-			return err
+	} else if needParams {
+		if cmd.Bool("list-params") {
+			return fmt.Errorf("--list-params requires --func")
 		}
+		return fmt.Errorf("--arg-filter requires --func")
 	}
 
 	// --list-params: show filterable parameters, then exit

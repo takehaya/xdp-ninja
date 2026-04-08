@@ -159,7 +159,7 @@ type FuncParamInfo struct {
 // Only integer parameters (excluding the first xdp_md/xdp_buff pointer) are returned,
 // as those are the only types supported for argument filtering.
 func GetFuncParams(prog *ebpf.Program, funcName string) ([]FuncParamInfo, error) {
-	spec, err := btfSpec(prog)
+	spec, err := BTFSpec(prog)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,11 @@ func GetFuncParamsFromSpec(spec *btf.Spec, funcName string) ([]FuncParamInfo, er
 		// Unwrap qualifiers and typedefs to get the underlying type
 		underlying := btf.UnderlyingType(p.Type)
 
-		// Only support integer types for filtering
+		// Only support named integer types for filtering.
+		// Unnamed parameters can't be targeted by --arg-filter.
+		if p.Name == "" {
+			continue
+		}
 		intType, ok := underlying.(*btf.Int)
 		if !ok {
 			continue
@@ -205,8 +209,8 @@ func GetFuncParamsFromSpec(spec *btf.Spec, funcName string) ([]FuncParamInfo, er
 	return params, nil
 }
 
-// btfSpec opens the BTF handle for a loaded program and returns its spec.
-func btfSpec(prog *ebpf.Program) (*btf.Spec, error) {
+// BTFSpec opens the BTF handle for a loaded program and returns its spec.
+func BTFSpec(prog *ebpf.Program) (*btf.Spec, error) {
 	handle, err := prog.Handle()
 	if err != nil {
 		return nil, fmt.Errorf("BTF unavailable: %w", err)
@@ -222,7 +226,7 @@ func btfSpec(prog *ebpf.Program) (*btf.Spec, error) {
 
 // ListFuncs returns all BTF function entries found in the program.
 func ListFuncs(prog *ebpf.Program) ([]FuncInfo, error) {
-	spec, err := btfSpec(prog)
+	spec, err := BTFSpec(prog)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +236,7 @@ func ListFuncs(prog *ebpf.Program) ([]FuncInfo, error) {
 // ValidateSubfunc checks that the given function name exists in the program's BTF.
 // If the function is not found, the error message includes a list of available functions.
 func ValidateSubfunc(prog *ebpf.Program, progID uint32, funcName string) error {
-	spec, err := btfSpec(prog)
+	spec, err := BTFSpec(prog)
 	if err != nil {
 		return fmt.Errorf("program (id=%d): %w", progID, err)
 	}
@@ -295,7 +299,7 @@ func resolveEntryFunc(prog *ebpf.Program, progID uint32) (string, error) {
 	}
 	progName := info.Name
 
-	spec, err := btfSpec(prog)
+	spec, err := BTFSpec(prog)
 	if err != nil {
 		return "", fmt.Errorf("program %q (id=%d): %w", progName, progID, err)
 	}

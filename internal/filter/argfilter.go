@@ -3,6 +3,7 @@ package filter
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,15 +34,21 @@ type ArgFilter struct {
 
 // String returns a human-readable representation of the filter.
 func (f *ArgFilter) String() string {
+	fmtVal := func(v uint64) string {
+		if f.Signed {
+			return fmt.Sprintf("%d", int64(v))
+		}
+		return fmt.Sprintf("%d", v)
+	}
 	switch f.Op {
 	case OpEqual:
-		return fmt.Sprintf("%s=%d", f.ParamName, f.Value)
+		return fmt.Sprintf("%s=%s", f.ParamName, fmtVal(f.Value))
 	case OpGreaterEqual:
-		return fmt.Sprintf("%s>=%d", f.ParamName, f.Value)
+		return fmt.Sprintf("%s>=%s", f.ParamName, fmtVal(f.Value))
 	case OpLessEqual:
-		return fmt.Sprintf("%s<=%d", f.ParamName, f.Value)
+		return fmt.Sprintf("%s<=%s", f.ParamName, fmtVal(f.Value))
 	case OpRange:
-		return fmt.Sprintf("%s=%d..%d", f.ParamName, f.Value, f.MaxValue)
+		return fmt.Sprintf("%s=%s..%s", f.ParamName, fmtVal(f.Value), fmtVal(f.MaxValue))
 	default:
 		return fmt.Sprintf("%s=?", f.ParamName)
 	}
@@ -198,7 +205,13 @@ func ParseAndValidateFilters(exprs []string, params []attach.FuncParamInfo) ([]A
 // validateValueRange checks that value fits within the given parameter size and signedness.
 func validateValueRange(value uint64, size uint32, signed bool, expr string) error {
 	if size >= 8 {
-		return nil // 64-bit: any value fits
+		// For signed 64-bit, values > int64 max are out of range (they would
+		// wrap to negative in eBPF signed comparisons).
+		if signed && value > uint64(math.MaxInt64) {
+			return fmt.Errorf("value %d in %q is out of range for 64-bit signed parameter [%d, %d]",
+				value, expr, math.MinInt64, int64(math.MaxInt64))
+		}
+		return nil
 	}
 	bits := size * 8
 	if signed {
