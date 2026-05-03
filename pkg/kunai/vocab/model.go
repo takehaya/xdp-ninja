@@ -30,12 +30,6 @@ type ProtocolSpec struct {
 	// chain stops without consuming further bytes. Nil when the
 	// vocab declared no <SELF>_CHAIN_END_<FIELD> const.
 	ChainEnd *ChainEndConst
-	// HeaderLength declares that the primary header has a
-	// declared-length variable trailer past its fixed minimum
-	// (IPv4 options when IHL > 5, TCP options when data_offset > 5,
-	// etc.). Codegen advances R4 past the trailer after the fixed
-	// extract. Nil when the .p4 declares no HDRLEN const set.
-	HeaderLength *HeaderLength
 	// FlagTriggers is an ordered set of "if a flag bit is set,
 	// advance R4 by N bytes" rules used by protocols whose header
 	// suffix is not a single declared length but a chain of
@@ -75,10 +69,10 @@ type ProtocolSpec struct {
 	Source         string       // original file path, for diagnostics
 }
 
-// HeaderLength describes a "primary header has a declared-length
-// variable trailer past its fixed minimum" pattern, fed to codegen by
-// five paired <SELF>_HDRLEN_* constants. The trailer length in
-// bytes is computed as
+// HeaderLength is the lowered shape of a primary-header variable
+// trailer — the parser-block `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`
+// template the loader resolves into a five-tuple codegen consumes.
+// The trailer length in bytes is computed as
 //
 //	((<byte at LenByteOff> & LenMask) >> LenShift) * Scale - Base
 //
@@ -90,7 +84,9 @@ type ProtocolSpec struct {
 //     LenByteOff=12, LenMask=0xF0, LenShift=4, Scale=4, Base=20
 //
 // Codegen caps the runtime advance via verifier-friendly scalar
-// narrowing so the suffix cannot grow past ScratchBufSize.
+// narrowing so the suffix cannot grow past ScratchBufSize. Carried
+// on each AdvanceOp.Skip; see (*ProtocolSpec).PrimaryAdvanceSkip
+// for the by-protocol accessor.
 type HeaderLength struct {
 	LenByteOff int
 	LenMask    int
@@ -102,8 +98,8 @@ type HeaderLength struct {
 // OptionWalk carries the metadata codegen needs to walk a TCP/IPv4
 // option list and dispatch on per-option kind. The walk starts at
 // the layer's variable trailer (= primary header size) and ends at
-// the trailer length declared by HDRLEN or at the first terminator
-// kind, whichever comes first.
+// the trailer length declared by the parser-block pkt.advance or at
+// the first terminator kind, whichever comes first.
 type OptionWalk struct {
 	TerminatorKind uint64
 	PaddingKind    uint64
@@ -170,29 +166,34 @@ type Field struct {
 
 // HasVariableLayout reports whether this protocol's layer body can
 // extend past its primary header — via parser-machine aux extracts
-// (GTP opt, IPv6 ext, SRv6 segments), a declared-length suffix
-// (IPv4 IHL, TCP data_offset), or flag-gated optional fields (GRE
-// C/K/S). Codegen consumes this to decide whether children must
-// anchor field reads on the layer-entry slot rather than on R4.
+// (GTP opt, IPv6 ext, SRv6 segments), a parser-block pkt.advance
+// trailer (IPv4 IHL, TCP data_offset), or flag-gated optional
+// fields (GRE C/K/S). Codegen consumes this to decide whether
+// children must anchor field reads on the layer-entry slot rather
+// than on R4. The pkt.advance trailer lives inside the parser
+// machine, so the first branch already covers it.
 func (p *ProtocolSpec) HasVariableLayout() bool {
-	return p.ParseStateMachine != nil || p.HeaderLength != nil || len(p.FlagTriggers) > 0
+	return p.ParseStateMachine != nil || len(p.FlagTriggers) > 0
 }
 
-// TotalExtracts reports the sum of `pkt.extract(...)` operations
-// across every state in the machine. Loader uses it to gate
-// HeaderLength coexistence on a single-extract invariant; downstream
-// invariants that depend on R4 sitting at primary_end at accept time
-// can reuse the same query.
-func (m *ParseStateMachine) TotalExtracts() int {
-	if m == nil {
-		return 0
+// PrimaryAdvanceSkip returns the protocol's primary-header
+// variable-trailer descriptor — the lowered shape of the parser
+// block's pkt.advance template — or nil when no state declares
+// one. By convention each protocol declares at most one such
+// trailer; subsequent advances are reserved for option-walk style
+// uses and skipped here.
+func (p *ProtocolSpec) PrimaryAdvanceSkip() *HeaderLength {
+	if p.ParseStateMachine == nil {
+		return nil
 	}
-	n := 0
-	for _, st := range m.States {
-		n += len(st.Extracts)
+	for _, st := range p.ParseStateMachine.States {
+		if len(st.Advances) > 0 {
+			return st.Advances[0].Skip
+		}
 	}
-	return n
+	return nil
 }
+
 
 // IsSelfValidating reports whether the parser block proves the
 // protocol's identity itself — i.e. its `start` state's transition
@@ -451,6 +452,7 @@ type HeaderStack struct {
 type ParseState struct {
 	Name          string
 	Extracts      []ExtractOp
+	Advances      []AdvanceOp
 	Trans         TransitionOp
 	OffsetAtEntry int
 	Pos           p4lite.Position
@@ -466,6 +468,24 @@ type ExtractOp struct {
 	IsStackPush bool           // true when target is `<stack>.next`
 	StackName   string         // when IsStackPush, the stack parameter name
 	Pos         p4lite.Position
+}
+
+// AdvanceOp is one `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`
+// statement in a state — the parser-block form of a variable
+// trailer. The loader resolves (Target, FieldName, BaseWords,
+// ScaleLog2) into the same five-tuple HeaderLength carries
+// (LenByteOff / LenMask / LenShift / Scale / Base) so codegen reuses
+// the existing emitVariableTrail path verbatim.
+//
+// Skip's LenByteOff is relative to the primary-header start (the
+// layer-entry slot), not to R4. This matches HeaderLength's
+// convention; the Skip is consumed by emitVariableTrailInline which
+// reads from the stored entry slot, not R4.
+type AdvanceOp struct {
+	Target    string // out parameter the field came from
+	FieldName string // field whose value drives the advance
+	Skip      *HeaderLength
+	Pos       p4lite.Position
 }
 
 // TransKind enumerates the four shapes of a parser-state

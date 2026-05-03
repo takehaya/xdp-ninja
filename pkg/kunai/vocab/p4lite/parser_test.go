@@ -429,3 +429,122 @@ func TestParseParamRejectsZeroArraySize(t *testing.T) {
 		t.Errorf("error = %q; want substring \"array size 0\"", err.Error())
 	}
 }
+
+// --- pkt.advance template ---
+
+func TestParseAdvanceTemplateRoundTrip(t *testing.T) {
+	src := `parser P(packet_in pkt, out tcp_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		pkt.advance(((bit<32>)(hdr.data_offset - 5)) << 5);
+		transition accept;
+	}
+}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Parsers) != 1 || len(f.Parsers[0].States) != 1 {
+		t.Fatalf("unexpected shape: %+v", f.Parsers)
+	}
+	stmts := f.Parsers[0].States[0].Stmts
+	if len(stmts) != 2 {
+		t.Fatalf("stmts=%d, want 2 (extract + advance)", len(stmts))
+	}
+	adv, ok := stmts[1].(*AdvanceStmt)
+	if !ok {
+		t.Fatalf("stmt[1] is %T, want *AdvanceStmt", stmts[1])
+	}
+	want := AdvanceStmt{
+		Object:    "pkt",
+		BitWidth:  32,
+		Target:    "hdr",
+		FieldName: "data_offset",
+		BaseWords: 5,
+		ScaleLog2: 5,
+	}
+	if adv.Object != want.Object || adv.BitWidth != want.BitWidth ||
+		adv.Target != want.Target || adv.FieldName != want.FieldName ||
+		adv.BaseWords != want.BaseWords || adv.ScaleLog2 != want.ScaleLog2 {
+		t.Errorf("AdvanceStmt = %+v, want %+v", *adv, want)
+	}
+}
+
+func TestParseAdvanceRejectsNonTemplateForms(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		// Note: unsupported method dispatch is exercised separately by
+		// TestParseRejectsUnknownMethodCall below. Tokens the lexer
+		// doesn't recognise (e.g. `+`) trip a lexer-level error before
+		// the template matcher runs and aren't covered here.
+		{"missing_paren_count", `pkt.advance((bit<32>)(hdr.data_offset - 5) << 5);`},
+		{"raw_int_arg", `pkt.advance(8);`},
+		{"missing_cast", `pkt.advance(((hdr.data_offset - 5)) << 5);`},
+		{"shift_right_instead_of_left", `pkt.advance(((bit<32>)(hdr.data_offset - 5)) >> 5);`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `parser P(packet_in pkt, out tcp_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		` + tc.body + `
+		transition accept;
+	}
+}`
+			_, err := Parse([]byte(src), "t.p4")
+			if err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.body)
+			}
+			if !strings.Contains(err.Error(), "pkt.advance must use the form") {
+				t.Errorf("err = %q; want template-form hint", err.Error())
+			}
+		})
+	}
+}
+
+func TestParseAdvanceRejectsOutOfRangeOperands(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		// S >= N: shifting a `bit<N>` value left by N or more bits is
+		// implementation-defined per P4-16 §8.7 — caught here so codegen
+		// doesn't have to.
+		{"shift_eq_width", `pkt.advance(((bit<32>)(hdr.data_offset - 5)) << 32);`, "shift S=32 must be smaller than the cast width N=32"},
+		{"shift_gt_width", `pkt.advance(((bit<32>)(hdr.data_offset - 5)) << 64);`, "shift S=64 must be smaller than the cast width N=32"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `parser P(packet_in pkt, out tcp_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		` + tc.body + `
+		transition accept;
+	}
+}`
+			_, err := Parse([]byte(src), "t.p4")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsUnknownMethodCall(t *testing.T) {
+	src := `parser P(packet_in pkt, out tcp_h hdr) {
+	state start {
+		pkt.lookahead(hdr);
+		transition accept;
+	}
+}`
+	_, err := Parse([]byte(src), "t.p4")
+	if err == nil {
+		t.Fatal("expected error for unsupported method")
+	}
+	if !strings.Contains(err.Error(), "unsupported method") {
+		t.Errorf("err = %q; want unsupported-method hint", err.Error())
+	}
+}

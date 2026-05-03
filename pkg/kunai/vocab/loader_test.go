@@ -195,7 +195,7 @@ func TestLoadIpv4DispatchClassification(t *testing.T) {
 		}
 	}
 	if !ipv4.IsSelfValidating() {
-		t.Error("ipv4 must be self-validating after the migration")
+		t.Error("ipv4 must be self-validating")
 	}
 }
 
@@ -588,7 +588,8 @@ func TestParseStateMachineTrivialIsNil(t *testing.T) {
 	// their version field and therefore carry a non-trivial parser
 	// machine — they are exercised by TestIsSelfValidating instead.
 	specs := loadBundled(t)
-	trivial := []string{"eth", "tcp", "udp", "icmp", "icmp6"}
+	// tcp's parser block is start + skip_options, so it is non-trivial.
+	trivial := []string{"eth", "udp", "icmp", "icmp6"}
 	for _, name := range trivial {
 		sp, ok := specs[name]
 		if !ok {
@@ -860,110 +861,50 @@ func specNames(s map[string]*ProtocolSpec) []string {
 	return out
 }
 
-// TestHeaderLengthIPv4 confirms the bundled IPv4 vocab declares the
-// HDRLEN five-tuple correctly so codegen can advance past
-// options when IHL > 5. The numeric values are pinned because
-// codegen depends on them — nudging them silently would shift R4.
-func TestHeaderLengthIPv4(t *testing.T) {
+// TestVariableTrailIPv4 confirms the bundled IPv4 vocab's parser
+// block lowers `pkt.advance(((bit<32>)(hdr.ihl - 5)) << 5)` to the
+// five-tuple HeaderLength shape codegen consumes. The numeric
+// values are pinned because codegen depends on them — nudging them
+// silently would shift R4.
+func TestVariableTrailIPv4(t *testing.T) {
 	specs := loadBundled(t)
-	vs := specs["ipv4"].HeaderLength
+	vs := specs["ipv4"].PrimaryAdvanceSkip()
 	if vs == nil {
-		t.Fatal("ipv4 must declare a HeaderLength")
+		t.Fatal("ipv4 must declare a variable trailer")
 	}
 	if vs.LenByteOff != 0 || vs.LenMask != 0x0F || vs.LenShift != 0 ||
 		vs.Scale != 4 || vs.Base != 20 {
-		t.Errorf("unexpected ipv4 HeaderLength: %+v", *vs)
+		t.Errorf("unexpected ipv4 trail Skip: %+v", *vs)
 	}
 }
 
-// TestHeaderLengthTCP confirms the TCP data_offset upper-nibble
+// TestVariableTrailTCP confirms the TCP data_offset upper-nibble
 // shape — the shift is what distinguishes it from IPv4 IHL.
-func TestHeaderLengthTCP(t *testing.T) {
+func TestVariableTrailTCP(t *testing.T) {
 	specs := loadBundled(t)
-	vs := specs["tcp"].HeaderLength
+	vs := specs["tcp"].PrimaryAdvanceSkip()
 	if vs == nil {
-		t.Fatal("tcp must declare a HeaderLength")
+		t.Fatal("tcp must declare a variable trailer")
 	}
 	if vs.LenByteOff != 12 || vs.LenMask != 0xF0 || vs.LenShift != 4 ||
 		vs.Scale != 4 || vs.Base != 20 {
-		t.Errorf("unexpected tcp HeaderLength: %+v", *vs)
+		t.Errorf("unexpected tcp trail Skip: %+v", *vs)
 	}
 }
 
-// TestHeaderLengthAbsentForFixedProtocols pins which protocols do
-// NOT declare a HeaderLength — adding HDRLEN to a previously-fixed
-// protocol changes codegen behaviour, so the test forces a deliberate
-// update here when that happens.
-func TestHeaderLengthAbsentForFixedProtocols(t *testing.T) {
+// TestVariableTrailAbsentForFixedProtocols pins which protocols
+// declare no variable trailer. Adding a trailer to a previously-
+// fixed protocol changes codegen behaviour, so the test forces a
+// deliberate update here when that happens.
+func TestVariableTrailAbsentForFixedProtocols(t *testing.T) {
 	specs := loadBundled(t)
 	for _, name := range []string{"eth", "ipv6", "udp", "gtp", "srv6", "vlan", "qinq", "mpls", "gre", "vxlan", "geneve", "icmp", "icmp6", "cw"} {
-		if specs[name].HeaderLength != nil {
-			t.Errorf("%s should not declare a HeaderLength (got %+v)", name, *specs[name].HeaderLength)
+		if vs := specs[name].PrimaryAdvanceSkip(); vs != nil {
+			t.Errorf("%s should not declare a variable trailer (got %+v)", name, *vs)
 		}
 	}
 }
 
-// TestHeaderLengthIncomplete rejects partial declarations: a
-// HDRLEN_BYTE_OFFSET without the rest is a configuration bug,
-// not a "best-effort" behaviour.
-func TestHeaderLengthIncomplete(t *testing.T) {
-	fsys := fstest.MapFS{
-		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h { bit<8> a; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0x0F;
-parser F(packet_in pkt, out foo_h h) {
-  state start { pkt.extract(h); transition accept; }
-}
-`)},
-	}
-	_, err := Load(fsys, "vocab")
-	if err == nil || !strings.Contains(err.Error(), "incomplete") {
-		t.Fatalf("expected incomplete-HDRLEN error, got %v", err)
-	}
-}
-
-// TestHeaderLengthUnknownSuffix rejects an unrecognised key like
-// HDRLEN_FOO so typos surface immediately.
-func TestHeaderLengthUnknownSuffix(t *testing.T) {
-	fsys := fstest.MapFS{
-		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h { bit<8> a; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_FOO = 0;
-parser F(packet_in pkt, out foo_h h) {
-  state start { pkt.extract(h); transition accept; }
-}
-`)},
-	}
-	_, err := Load(fsys, "vocab")
-	if err == nil || !strings.Contains(err.Error(), "unknown suffix") {
-		t.Fatalf("expected unknown-suffix error, got %v", err)
-	}
-}
-
-// TestHeaderLengthBaseMustEqualHeaderSize: Base != header bytes is
-// a logical error — the codegen subtracts Base from total to get the
-// trailer length, so any mismatch means the vocab and codegen
-// disagree about where the fixed prefix ends.
-func TestHeaderLengthBaseMustEqualHeaderSize(t *testing.T) {
-	fsys := fstest.MapFS{
-		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h { bit<8> a; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0x0F;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 8;
-parser F(packet_in pkt, out foo_h h) {
-  state start { pkt.extract(h); transition accept; }
-}
-`)},
-	}
-	_, err := Load(fsys, "vocab")
-	if err == nil || !strings.Contains(err.Error(), "primary header size") {
-		t.Fatalf("expected base-mismatch error, got %v", err)
-	}
-}
 
 // TestFlagTriggersGRE confirms the bundled GRE vocab declares the
 // C/K/S optional-field triggers in declaration order so codegen
@@ -1043,12 +984,11 @@ parser F(packet_in pkt, out foo_h h) {
 	}
 }
 
-// TestAllowsParserMachinePlusHDRLEN pins the relaxed layout rule:
-// vocab MAY declare both a non-trivial parser block (e.g. version
-// self-validation) AND a primary-header HDRLEN trailer. The
-// parser machine handles extract + validation; codegen runs the
-// HDRLEN trail at the parser's accept landing. Used by ipv4 / ipv6.
-func TestAllowsParserMachinePlusHDRLEN(t *testing.T) {
+// TestRejectsLegacyHDRLEN pins the loud rejection of any `HDRLEN_*`
+// const family — the parser-block `pkt.advance` form is the single
+// source of truth for variable trailers, and a silent fallthrough
+// would let a stale vocab file compile to no trailer at all.
+func TestRejectsLegacyHDRLEN(t *testing.T) {
 	fsys := fstest.MapFS{
 		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
 header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
@@ -1058,128 +998,148 @@ const bit<8> FOO_HDRLEN_SHIFT = 0;
 const bit<8> FOO_HDRLEN_SCALE = 4;
 const bit<8> FOO_HDRLEN_BASE = 4;
 parser F(packet_in pkt, out foo_h h) {
-  state start {
-    pkt.extract(h);
-    transition select(h.ver) { 1: accept; default: reject; }
-  }
-}
-`)},
-	}
-	specs, err := Load(fsys, "vocab")
-	if err != nil {
-		t.Fatalf("expected load success with parser machine + HDRLEN, got %v", err)
-	}
-	foo := specs["foo"]
-	if foo == nil {
-		t.Fatal("foo spec not loaded")
-	}
-	if foo.ParseStateMachine == nil {
-		t.Error("expected non-trivial ParseStateMachine")
-	}
-	if foo.HeaderLength == nil {
-		t.Error("expected HeaderLength to coexist with ParseStateMachine")
-	}
-}
-
-// TestRejectsParserMachineMultiExtractPlusHDRLEN pins the
-// single-extract invariant the HDRLEN_* trailer codegen relies
-// on: when a vocab pairs HeaderLength with a parser machine that
-// extracts more than once (e.g. primary + aux stack), R4 at the
-// parser's accept landing no longer equals primary_end and the trail
-// would silently miscompute. Loader must reject this combination so
-// the silent miss never reaches codegen.
-func TestRejectsParserMachineMultiExtractPlusHDRLEN(t *testing.T) {
-	fsys := fstest.MapFS{
-		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h     { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
-header foo_ext_h { bit<8> kind; bit<8> _pad; bit<16> data; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0x0F;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 4;
-parser F(packet_in pkt, out foo_h h, out foo_ext_h[4] exts) {
-  state start {
-    pkt.extract(h);
-    transition select(h.ver) {
-      0: parse_ext;
-      default: accept;
-    }
-  }
-  state parse_ext {
-    pkt.extract(exts.next);
-    transition accept;
-  }
+  state start { pkt.extract(h); transition accept; }
 }
 `)},
 	}
 	_, err := Load(fsys, "vocab")
-	if err == nil || !strings.Contains(err.Error(), "multi-extract parser machine") {
-		t.Fatalf("expected multi-extract guard error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "HDRLEN_* const family is no longer supported") {
+		t.Fatalf("expected HDRLEN retirement error, got %v", err)
 	}
 }
 
-// TestHdrLenFieldAlignmentRejects pins the four ways an HDRLEN_*
-// declaration can fail the field-alignment integrity check. Each
-// row describes one footgun the check catches:
-//   - byte_offset_miss / mask_width_miss: the masked window doesn't
-//     line up with a single declared field
-//   - non_contiguous_mask: the formula assumes one contiguous bit run
-//   - shift_mask_mismatch: SHIFT must equal the mask's lowest set bit
-func TestHdrLenFieldAlignmentRejects(t *testing.T) {
+// TestParserBlockAdvanceLowersToHeaderLength pins the loader-side
+// translation of `pkt.advance(((bit<32>)(hdr.<F> - K)) << S)` into
+// the five-tuple HeaderLength shape codegen consumes — the
+// load-bearing invariant connecting parser-block syntax to the
+// variable-trail emit path.
+func TestParserBlockAdvanceLowersToHeaderLength(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want HeaderLength
+	}{
+		{
+			// TCP shape: data_offset (bit<4>) at byte 12 upper nibble,
+			// 4-byte word scale, 5-word minimum (= 20-byte primary).
+			"tcp_data_offset",
+			`header foo_h {
+				bit<16> sport;
+				bit<16> dport;
+				bit<32> seq;
+				bit<32> ack;
+				bit<4>  data_offset;
+				bit<3>  reserved;
+				bit<9>  flags;
+				bit<16> window;
+				bit<16> checksum;
+				bit<16> urgent_ptr;
+			}
+			parser P(packet_in pkt, out foo_h hdr) {
+				state start {
+					pkt.extract(hdr);
+					transition skip;
+				}
+				state skip {
+					pkt.advance(((bit<32>)(hdr.data_offset - 5)) << 5);
+					transition accept;
+				}
+			}`,
+			HeaderLength{LenByteOff: 12, LenMask: 0xF0, LenShift: 4, Scale: 4, Base: 20},
+		},
+		{
+			// IPv4 shape: ihl (bit<4>) at byte 0 lower nibble.
+			"ipv4_ihl",
+			`header foo_h { bit<4> version; bit<4> ihl; bit<8> tos; bit<16> total; }
+			parser P(packet_in pkt, out foo_h hdr) {
+				state start {
+					pkt.extract(hdr);
+					transition skip;
+				}
+				state skip {
+					pkt.advance(((bit<32>)(hdr.ihl - 5)) << 5);
+					transition accept;
+				}
+			}`,
+			HeaderLength{LenByteOff: 0, LenMask: 0x0F, LenShift: 0, Scale: 4, Base: 20},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{
+				"vocab/foo.p4": &fstest.MapFile{Data: []byte(tc.body)},
+			}
+			specs, err := Load(fsys, "vocab")
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			var spec *ProtocolSpec
+			for _, s := range specs {
+				spec = s
+				break
+			}
+			if spec == nil || spec.ParseStateMachine == nil {
+				t.Fatalf("no ParseStateMachine produced")
+			}
+			var advances []AdvanceOp
+			for _, st := range spec.ParseStateMachine.States {
+				advances = append(advances, st.Advances...)
+			}
+			if len(advances) != 1 {
+				t.Fatalf("Advances=%d, want 1", len(advances))
+			}
+			got := *advances[0].Skip
+			if got != tc.want {
+				t.Errorf("Skip = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParserBlockAdvanceRejects pins the load-time guards on
+// pkt.advance: target must be the primary header, field must exist
+// inside one byte, and the shift must give a whole-byte scale.
+func TestParserBlockAdvanceRejects(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 		want string
 	}{
 		{
-			"byte_offset_miss",
-			`header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 1;
-const bit<8> FOO_HDRLEN_MASK = 0x0F;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 4;`,
-			"does not match any declared field",
+			"unknown_field",
+			`header foo_h { bit<8> a; }
+parser P(packet_in pkt, out foo_h hdr) {
+	state start { pkt.extract(hdr); transition skip; }
+	state skip { pkt.advance(((bit<32>)(hdr.bogus - 5)) << 5); transition accept; }
+}`,
+			"unknown field",
 		},
 		{
-			"mask_width_miss",
-			`header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0xFF;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 4;`,
-			"does not match any declared field",
+			"sub_byte_shift",
+			`header foo_h { bit<4> ver; bit<4> hdrlen; }
+parser P(packet_in pkt, out foo_h hdr) {
+	state start { pkt.extract(hdr); transition skip; }
+	state skip { pkt.advance(((bit<32>)(hdr.hdrlen - 5)) << 2); transition accept; }
+}`,
+			"sub-byte",
 		},
 		{
-			"non_contiguous_mask",
-			`header foo_h { bit<8> a; bit<8> b; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0x55;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 2;`,
-			"not a contiguous run",
-		},
-		{
-			"shift_mask_mismatch",
-			`header foo_h { bit<4> hdrlen; bit<4> rsvd; bit<8> b; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0xF0;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 4;
-const bit<8> FOO_HDRLEN_BASE = 2;`,
-			"is inconsistent with HDRLEN_MASK",
+			"extract_advance_mix",
+			`header foo_h { bit<4> ver; bit<4> hdrlen; }
+parser P(packet_in pkt, out foo_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		pkt.advance(((bit<32>)(hdr.hdrlen - 5)) << 5);
+		transition accept;
+	}
+}`,
+			"mixes pkt.extract and pkt.advance",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fsys := fstest.MapFS{
-				"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-` + tc.body + `
-parser F(packet_in pkt, out foo_h h) { state start { pkt.extract(h); transition accept; } }
-`)},
+				"vocab/foo.p4": &fstest.MapFile{Data: []byte(tc.body)},
 			}
 			_, err := Load(fsys, "vocab")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -1233,29 +1193,6 @@ parser F(packet_in pkt, out foo_h h) {
 	_, err := Load(fsys, "vocab")
 	if err == nil || !strings.Contains(err.Error(), "OPT_TRIGGER_") {
 		t.Fatalf("expected layout exclusivity error, got %v", err)
-	}
-}
-
-// TestHeaderLengthScaleMustBePowerOfTwo: codegen lowers the
-// `* Scale` step to a left-shift table, so non-power-of-two values
-// or values past 128 break the emit.
-func TestHeaderLengthScaleMustBePowerOfTwo(t *testing.T) {
-	fsys := fstest.MapFS{
-		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h { bit<8> a; bit<8> b; bit<16> c; }
-const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> FOO_HDRLEN_MASK = 0x0F;
-const bit<8> FOO_HDRLEN_SHIFT = 0;
-const bit<8> FOO_HDRLEN_SCALE = 3;
-const bit<8> FOO_HDRLEN_BASE = 4;
-parser F(packet_in pkt, out foo_h h) {
-  state start { pkt.extract(h); transition accept; }
-}
-`)},
-	}
-	_, err := Load(fsys, "vocab")
-	if err == nil || !strings.Contains(err.Error(), "power of two") {
-		t.Fatalf("expected scale-power-of-two error, got %v", err)
 	}
 }
 

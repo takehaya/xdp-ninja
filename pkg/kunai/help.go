@@ -76,6 +76,7 @@ func protocolHeaderBytes(spec *vocab.ProtocolSpec) int {
 	return (bits + 7) / 8
 }
 
+
 func dispatchParents(spec *vocab.ProtocolSpec) []string {
 	seen := map[string]struct{}{}
 	for _, c := range spec.Consts {
@@ -214,15 +215,15 @@ func WriteProtocolHelp(w io.Writer, name string) error {
 	}
 
 	// Notes: emit one line per *present* variability source. Some
-	// protocols carry more than one (e.g. ipv4 has both a HDRLEN IHL
-	// trailer AND a parser-machine version self-check), so the
-	// branches are independent — switch{first-match} would silently
+	// protocols carry more than one (e.g. ipv4 has both a parser-block
+	// pkt.advance trailer AND a parser-machine version self-check), so
+	// the branches are independent — switch{first-match} would silently
 	// drop the second source.
 	if spec.HasVariableLayout() {
 		if _, err := io.WriteString(w, "\nNotes:\n"); err != nil {
 			return err
 		}
-		if vs := spec.HeaderLength; vs != nil {
+		if vs := spec.PrimaryAdvanceSkip(); vs != nil {
 			if _, err := fmt.Fprintf(w, "  variable trailer: ((byte@%d & 0x%x) >> %d) * %d - %d bytes past fixed header\n",
 				vs.LenByteOff, vs.LenMask, vs.LenShift, vs.Scale, vs.Base); err != nil {
 				return err

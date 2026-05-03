@@ -63,17 +63,6 @@ func genParserMachine(layer *ir.LayerInstance, layerIdx int, all []*ir.LayerInst
 	// helper call, so a Mov R3,R3 noop here would be !read_ok —
 	// pick R0 which is consistent on both paths.
 	insns = append(insns, asm.Mov.Reg(asm.R0, asm.R0).WithSymbol(pmCtx.doneLabel))
-
-	// Layer-level HDRLEN_* trail: when the protocol declares both
-	// a parser machine (version self-check) and a HeaderLength (ipv4
-	// IHL trailing), R4 sits at primary_end after the parser's
-	// emitAdvance(hs) inside emitStateBody — same precondition as
-	// genStaticLayer, so they share emitPrimaryVariableTail.
-	tail, err := emitPrimaryVariableTail(spec)
-	if err != nil {
-		return nil, nil, err
-	}
-	insns = append(insns, tail...)
 	return insns, callbacks, nil
 }
 
@@ -120,7 +109,7 @@ func (c *pmCtx) emitState(stateIdx int) (asm.Instructions, asm.Instructions, err
 		//
 		//   1. Parent emitted its layer body and stored its own entry
 		//      offsetBase to the slot — either here for parser-machine
-		//      parents, or in genStaticLayer for HDRLEN/OPT parents.
+		//      parents, or in genStaticLayer for OPT parents.
 		//   2. emitEntryDispatch (just above) reads that slot to
 		//      anchor `parent.field == const` reads on the parent's
 		//      primary header, regardless of how far the parent has
@@ -230,6 +219,25 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 			}
 			insns = append(insns, tail...)
 		}
+	}
+
+	// Per-AdvanceOp emit: pkt.advance(...) lowers to the standard
+	// variableTailSkip codegen. The "fixed header size already
+	// advanced" arg is state.OffsetAtEntry — R4 sits at
+	// layer_entry + OffsetAtEntry on state entry, and the loader-
+	// side build constraints (advance lives in its own extract-less
+	// state, references the primary header) keep that invariant
+	// trivially true.
+	for _, adv := range state.Advances {
+		if state.OffsetAtEntry < 0 {
+			return nil, nil, fmt.Errorf("%w: state %q has dynamic R4 on entry; pkt.advance requires a static layer-entry offset", ErrNotImplemented, state.Name)
+		}
+		vt := variableTailSkipFromHeaderLength(adv.Skip)
+		tail, err := emitVariableTrailInline(state.OffsetAtEntry, vt, dslReject)
+		if err != nil {
+			return nil, nil, err
+		}
+		insns = append(insns, tail...)
 	}
 
 	if !selfLoop {

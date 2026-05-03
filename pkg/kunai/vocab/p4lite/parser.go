@@ -19,6 +19,7 @@ package p4lite
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -358,6 +359,17 @@ func (p *parser) parseState() (*State, error) {
 	return st, nil
 }
 
+// supportedMethods maps the method-keyword token to the per-method
+// parser. Adding a new method (e.g. lookahead in B-3) means adding
+// one entry here; the dispatch error in parseStmt picks up the new
+// name automatically.
+var supportedMethods = map[TokenKind]func(p *parser, obj string, startPos Position) (Stmt, error){
+	TokExtract: (*parser).parseExtractCall,
+	TokAdvance: (*parser).parseAdvanceCall,
+}
+
+// parseStmt dispatches on the method name in `obj.method(...)` to
+// the per-method parser via supportedMethods.
 func (p *parser) parseStmt() (Stmt, error) {
 	startPos := p.cur.Pos
 	obj, err := p.expect(TokIdent)
@@ -367,9 +379,23 @@ func (p *parser) parseStmt() (Stmt, error) {
 	if _, err := p.expect(TokDot); err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(TokExtract); err != nil {
-		return nil, err
+	if handler, ok := supportedMethods[p.cur.Kind]; ok {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		return handler(p, obj.Value, startPos)
 	}
+	names := make([]string, 0, len(supportedMethods))
+	for k := range supportedMethods {
+		names = append(names, k.String())
+	}
+	sort.Strings(names)
+	return nil, p.errorf(p.cur.Pos, "unsupported method %s on %q (recognised: %s)", p.cur.Kind, obj.Value, strings.Join(names, ", "))
+}
+
+// parseExtractCall handles `obj.extract(target)` or
+// `obj.extract(target.next)`. Cursor sits past the `extract` token.
+func (p *parser) parseExtractCall(obj string, startPos Position) (Stmt, error) {
 	if _, err := p.expect(TokLParen); err != nil {
 		return nil, err
 	}
@@ -377,7 +403,7 @@ func (p *parser) parseStmt() (Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	es := &ExtractStmt{Object: obj.Value, Target: targ.Value, Pos: startPos}
+	es := &ExtractStmt{Object: obj, Target: targ.Value, Pos: startPos}
 	if _, ok, err := p.accept(TokDot); err != nil {
 		return nil, err
 	} else if ok {
@@ -398,6 +424,96 @@ func (p *parser) parseStmt() (Stmt, error) {
 	}
 	return es, nil
 }
+
+// parseAdvanceCall handles `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`,
+// the single template p4lite accepts for variable-trailer skips.
+// Cursor sits past the `advance` token. Anything that doesn't match
+// the template shape (other expression forms, missing parens, etc.)
+// gets a loud, source-located error pointing at the supported form.
+func (p *parser) parseAdvanceCall(obj string, startPos Position) (Stmt, error) {
+	mismatch := func(pos Position) error {
+		return p.errorf(pos, "pkt.advance must use the form `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`")
+	}
+	expectShape := func(k TokenKind) (Token, error) {
+		if p.cur.Kind != k {
+			return Token{}, mismatch(p.cur.Pos)
+		}
+		t := p.cur
+		if err := p.advance(); err != nil {
+			return Token{}, err
+		}
+		return t, nil
+	}
+	for _, k := range []TokenKind{TokLParen, TokLParen, TokLParen, TokBit, TokLAngle} {
+		if _, err := expectShape(k); err != nil {
+			return nil, err
+		}
+	}
+	nTok, err := expectShape(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range []TokenKind{TokRAngle, TokRParen, TokLParen} {
+		if _, err := expectShape(k); err != nil {
+			return nil, err
+		}
+	}
+	hdrTok, err := expectShape(TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokDot); err != nil {
+		return nil, err
+	}
+	fldTok, err := expectShape(TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokMinus); err != nil {
+		return nil, err
+	}
+	kTok, err := expectShape(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range []TokenKind{TokRParen, TokRParen, TokLShift} {
+		if _, err := expectShape(k); err != nil {
+			return nil, err
+		}
+	}
+	sTok, err := expectShape(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokRParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokSemi); err != nil {
+		return nil, err
+	}
+	// BaseWords and ScaleLog2 are bounded small integers — a word
+	// count and a log2 shift. ScaleLog2 ≥ 32 would shift past the
+	// `bit<32>` cast width (P4-16 §8.7 makes this implementation-
+	// defined); BaseWords ≥ 2^31 can't represent any meaningful
+	// header trailer.
+	if kTok.Int > uint64(maxInt32) {
+		return nil, p.errorf(kTok.Pos, "K=%d exceeds the supported range for the BaseWords slot", kTok.Int)
+	}
+	if sTok.Int >= uint64(nTok.Int) {
+		return nil, p.errorf(sTok.Pos, "shift S=%d must be smaller than the cast width N=%d", sTok.Int, nTok.Int)
+	}
+	return &AdvanceStmt{
+		Object:    obj,
+		BitWidth:  int(nTok.Int),
+		Target:    hdrTok.Value,
+		FieldName: fldTok.Value,
+		BaseWords: int(kTok.Int),
+		ScaleLog2: int(sTok.Int),
+		Pos:       startPos,
+	}, nil
+}
+
+const maxInt32 = 1<<31 - 1
 
 func (p *parser) parseTransition() (*Transition, error) {
 	startPos := p.cur.Pos

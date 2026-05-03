@@ -23,6 +23,7 @@ type buildCtx struct {
 	stackRefs  map[string]*HeaderStack
 	stateIdx   map[string]int
 	source     string
+	primary    *p4lite.Header // pkt.advance must reference this header
 }
 
 // buildParseStateMachine constructs a ParseStateMachine from a
@@ -63,6 +64,7 @@ func buildParseStateMachine(file *p4lite.File, primary *p4lite.Header, source st
 		stackRefs:  stackRefs,
 		stateIdx:   stateIdx,
 		source:     source,
+		primary:    primary,
 	}
 	states := make([]*ParseState, len(p.States))
 	for i, s := range p.States {
@@ -436,21 +438,31 @@ func buildState(s *p4lite.State, ctx *buildCtx) (*ParseState, error) {
 
 	pushCount := 0
 	for _, stmt := range s.Stmts {
-		es, ok := stmt.(*p4lite.ExtractStmt)
-		if !ok {
-			return nil, fmt.Errorf("%s:%s: state %q contains an unsupported statement (only `pkt.extract(...)` is allowed)", ctx.source, s.Pos, s.Name)
+		switch v := stmt.(type) {
+		case *p4lite.ExtractStmt:
+			op, err := buildExtract(v, ctx)
+			if err != nil {
+				return nil, err
+			}
+			if op.IsStackPush {
+				pushCount++
+			}
+			ps.Extracts = append(ps.Extracts, op)
+		case *p4lite.AdvanceStmt:
+			op, err := buildAdvance(v, ctx)
+			if err != nil {
+				return nil, err
+			}
+			ps.Advances = append(ps.Advances, op)
+		default:
+			return nil, fmt.Errorf("%s:%s: state %q contains an unsupported statement type %T", ctx.source, s.Pos, s.Name, stmt)
 		}
-		op, err := buildExtract(es, ctx)
-		if err != nil {
-			return nil, err
-		}
-		if op.IsStackPush {
-			pushCount++
-		}
-		ps.Extracts = append(ps.Extracts, op)
 	}
 	if pushCount > 1 {
 		return nil, fmt.Errorf("%s:%s: state %q pushes %d stack entries; MVP allows at most one stack push per state", ctx.source, s.Pos, s.Name, pushCount)
+	}
+	if len(ps.Advances) > 0 && len(ps.Extracts) > 0 {
+		return nil, fmt.Errorf("%s:%s: state %q mixes pkt.extract and pkt.advance; MVP requires the advance to live in its own state (R4 is fixed at primary-end on entry)", ctx.source, s.Pos, s.Name)
 	}
 
 	trans, err := buildTransition(s.Transition, ctx)
@@ -494,6 +506,68 @@ func buildExtract(es *p4lite.ExtractStmt, ctx *buildCtx) (ExtractOp, error) {
 		HeaderRef:  h,
 		HeaderSize: bits,
 		Pos:        es.Pos,
+	}, nil
+}
+
+// buildAdvance resolves a `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`
+// statement against the parser block's primary `out` parameter and
+// produces an AdvanceOp whose Skip carries the lowered five-tuple
+// codegen consumes. The conversion arithmetic:
+//
+//	ScaleBytes  = 1 << (ScaleLog2 - 3)         // S is in bits, Scale in bytes
+//	LenByteOff  = bitOff(F) / 8                // F's byte position
+//	bitInByte   = bitOff(F) % 8                // network MSB-first
+//	LenShift    = 8 - bitInByte - F.bits       // LSB-numbered shift
+//	LenMask     = ((1 << F.bits) - 1) << LenShift
+//	Base        = K * ScaleBytes               // = MinimumTotal in variableTailSkip
+//
+// Three load-time constraints, each rejecting a shape codegen does
+// not have a path for:
+//   - Target must be the primary header. Aux fields would need a
+//     different anchor than the layer-entry slot the trailer emit
+//     reads from.
+//   - F must exist and fit inside one byte. The variableTailSkip
+//     LenMask/LenShift addressing is single-byte only; cross-byte
+//     fields would need a different byte-load codegen.
+//   - ScaleLog2 ≥ 3 keeps Scale a whole-byte multiplier; codegen
+//     advances R4 in bytes, sub-byte shifts have no path.
+func buildAdvance(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
+	h, ok := ctx.headerRefs[as.Target]
+	if !ok {
+		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance target %q is not an `out` header parameter", ctx.source, as.Pos, as.Target)
+	}
+	if h != ctx.primary {
+		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance target %q is not the primary header %q", ctx.source, as.Pos, h.Name, ctx.primary.Name)
+	}
+	fields := make([]Field, len(h.Fields))
+	for i, f := range h.Fields {
+		fields[i] = Field{Name: f.Name, Bits: f.Bits}
+	}
+	bitOff, fieldBits, ok := BitOffsetIn(fields, as.FieldName)
+	if !ok {
+		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance references unknown field %q in header %q", ctx.source, as.Pos, as.FieldName, h.Name)
+	}
+	bitInByte := bitOff % 8
+	if bitInByte+fieldBits > 8 {
+		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance field %q crosses a byte boundary (bits [%d,%d) — only single-byte fields are supported)", ctx.source, as.Pos, as.FieldName, bitOff, bitOff+fieldBits)
+	}
+	if as.ScaleLog2 < 3 {
+		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance shift S=%d is sub-byte (codegen advances in whole bytes; require S ≥ 3)", ctx.source, as.Pos, as.ScaleLog2)
+	}
+	lsbShift := 8 - bitInByte - fieldBits
+	mask := ((1 << fieldBits) - 1) << lsbShift
+	scaleBytes := 1 << (as.ScaleLog2 - 3)
+	return AdvanceOp{
+		Target:    as.Target,
+		FieldName: as.FieldName,
+		Skip: &HeaderLength{
+			LenByteOff: bitOff / 8,
+			LenMask:    mask,
+			LenShift:   lsbShift,
+			Scale:      scaleBytes,
+			Base:       as.BaseWords * scaleBytes,
+		},
+		Pos: as.Pos,
 	}, nil
 }
 

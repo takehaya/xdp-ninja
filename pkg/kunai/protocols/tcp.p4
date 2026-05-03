@@ -20,18 +20,6 @@ const bit<8> TCP_IPV6_NEXT_HEADER = 6;
 // srv6_h). The numeric value matches IPv6's protocol assignment.
 const bit<8> TCP_SRV6_NEXT_HEADER = 6;
 
-// TCP options carry a variable trailer past the 20-byte fixed
-// header: total header length is data_offset × 4 bytes (data_offset
-// is the upper nibble of byte 12). Codegen reads the byte at offset
-// 12, masks with 0xF0, shifts right 4, multiplies by 4, then
-// subtracts the 20-byte minimum to obtain the options length.
-// data_offset < 5 falls below MinimumTotal=20 and rejects the
-// packet.
-const bit<8> TCP_HDRLEN_BYTE_OFFSET = 12;
-const bit<8> TCP_HDRLEN_MASK        = 0xF0;
-const bit<8> TCP_HDRLEN_SHIFT       = 4;
-const bit<8> TCP_HDRLEN_SCALE       = 4;
-const bit<8> TCP_HDRLEN_BASE        = 20;
 
 // === TCP options (RFC 9293, IANA TCP Parameters) ===
 //
@@ -99,6 +87,10 @@ parser TcpFragment(packet_in pkt,
                    out tcp_opt_ts_h        ts) {
     state start {
         pkt.extract(hdr);
+        transition skip_options;
+    }
+    state skip_options {
+        pkt.advance(((bit<32>)(hdr.data_offset - 5)) << 5);
         transition accept;
     }
 }

@@ -250,7 +250,7 @@ const KunaiStackTop = int16(-56)
 //
 // holds for every reachable chain shape. Per-protocol max trail
 // is `(LenMask >> LenShift) << log2(Scale) - MinimumTotal + Base`
-// for HDRLEN, `iter_cap × per-iter advance` for parser-machine
+// for primary-header pkt.advance trailers, `iter_cap × per-iter advance` for parser-machine
 // self-loops (e.g. ipv6_ext_h LenMask=0x03 ⇒ 32 B/iter × 4 iter cap
 // = 128 B). Currently every chain in the bundled vocab fits within
 // 320 B; the 192 B slack accommodates one more variable-trail layer
@@ -629,10 +629,10 @@ func genStaticLayer(layer *ir.LayerInstance, index int, all []*ir.LayerInstance)
 	if layer.Spec.HasVariableLayout() {
 		// Save this layer's entry offsetBase to the slot before the
 		// fixed-prefix advance so children's dispatch can recover the
-		// primary-header position regardless of how far HDRLEN / OPT
-		// shifts R4 afterwards. Mirror of parser_machine.go's slot
-		// store — see the lifecycle docs there for the read/write
-		// ordering invariant.
+		// primary-header position regardless of how far the OPT-flag
+		// shift moves R4 afterwards. Mirror of parser_machine.go's
+		// slot store — see the lifecycle docs there for the
+		// read/write ordering invariant.
 		insns = append(insns, asm.StoreMem(asm.R10, bpfLoopCtxLayerEntrySlot, offsetBase, asm.DWord))
 	}
 	if layer.NeedsRuntimeOffset {
@@ -648,11 +648,6 @@ func genStaticLayer(layer *ir.LayerInstance, index int, all []*ir.LayerInstance)
 		insns = append(insns, asm.StoreMem(asm.R10, slotEntry, offsetBase, asm.DWord))
 	}
 	insns = append(insns, emitAdvance(hs))
-	tail, err := emitPrimaryVariableTail(layer.Spec)
-	if err != nil {
-		return nil, err
-	}
-	insns = append(insns, tail...)
 	if len(layer.Spec.FlagTriggers) > 0 {
 		flags, err := emitFlagTriggers(hs, layer.Spec.FlagsByteOffset, layer.Spec.FlagTriggers, dslReject)
 		if err != nil {
@@ -702,25 +697,6 @@ func emitFlagTriggers(fixedHs, flagsByteOff int, triggers []vocab.FlagTrigger, f
 	return insns, nil
 }
 
-// emitPrimaryVariableTail emits the HDRLEN_* trail consume for a
-// layer whose primary header carries an IHL-style declared-length
-// trailer. R4 must already point past the fixed primary header; the
-// trail reads the length field, scales it, subtracts MinimumTotal,
-// and advances R4 the rest of the way. Returns nil instructions when
-// the spec has no HeaderLength. Shared between genStaticLayer's
-// fixed-size path and genParserMachine's accept landing.
-func emitPrimaryVariableTail(spec *vocab.ProtocolSpec) (asm.Instructions, error) {
-	vs := spec.HeaderLength
-	if vs == nil {
-		return nil, nil
-	}
-	hs, err := headerSize(spec)
-	if err != nil {
-		return nil, err
-	}
-	return emitVariableTrailInline(hs, variableTailSkipFromHeaderLength(vs), dslReject)
-}
-
 // variableTailSkipFromHeaderLength lifts a vocab.HeaderLength into the
 // codegen-internal variableTailSkip representation. Primary-header
 // suffixes always set MinimumTotal so an undersized length field
@@ -734,6 +710,7 @@ func variableTailSkipFromHeaderLength(vs *vocab.HeaderLength) variableTailSkip {
 		MinimumTotal:    vs.Base,
 	}
 }
+
 
 // genOptionalLayer emits the `?` quantifier: peek the dispatch check
 // from the parent; if it fails we skip the layer entirely without
@@ -919,10 +896,19 @@ func genFieldDispatchAltDiverged(current *ir.LayerInstance, altParents []*ir.Lay
 
 		if i+1 < len(altParents) {
 			insns = append(insns, asm.Ja.Label(doneLabel))
-			insns = append(insns, landingNoop(skipLabel))
+			// `Mov R0, R0` (rather than landingNoop's `Mov R3, R3`)
+			// because the path entering this skip label took JNE on
+			// matchedAltReg from an earlier alt — that alt's body may
+			// have ended in a parser-machine bpf_loop call, which the
+			// helper is allowed to clobber R3 across. R0 is restored
+			// from a stack save inside emitSelfLoop, so reading it
+			// here is verifier-safe; canonical landingNoop would
+			// trip an `R3 !read_ok`.
+			insns = append(insns, asm.Mov.Reg(asm.R0, asm.R0).WithSymbol(skipLabel))
 		}
 	}
-	insns = append(insns, landingNoop(doneLabel))
+	// Same R0-vs-R3 reasoning as the skip-label landing above.
+	insns = append(insns, asm.Mov.Reg(asm.R0, asm.R0).WithSymbol(doneLabel))
 	return insns, nil
 }
 
