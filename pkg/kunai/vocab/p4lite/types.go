@@ -146,6 +146,32 @@ type ExtractStmt struct {
 
 func (*ExtractStmt) stmtNode() {}
 
+// AdvanceStmt represents `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`,
+// the single variable-trailer skip template p4lite recognises. The
+// arg, in P4-16 standard form, computes the trailer length in BITS as
+//
+//	((field_value - BaseWords) * 2^ScaleLog2) bits
+//
+// Higher layers translate (Target, FieldName, BaseWords, ScaleLog2)
+// into the codegen's existing variableTailSkip shape (byte offset /
+// mask / shift / scale / base) by resolving the field's position in
+// the primary header.
+//
+// BNF: parserStatement (methodCall variant, P4-16 Section 13.5;
+// the spec'd advance signature is `void packet_in.advance(in
+// bit<32> sizeInBits)`).
+type AdvanceStmt struct {
+	Object    string // method receiver, e.g. "pkt"
+	BitWidth  int    // the N in `(bit<N>) ...`
+	Target    string // the `hdr` in `hdr.<F>` — the parser's `out` parameter holding the field
+	FieldName string // the `<F>` in `hdr.<F>`
+	BaseWords int    // the K subtracted from the field value
+	ScaleLog2 int    // the S in `<< S` (unit: bits)
+	Pos       Position
+}
+
+func (*AdvanceStmt) stmtNode() {}
+
 // TransKind tags Transition with which transition shape was parsed.
 type TransKind int
 

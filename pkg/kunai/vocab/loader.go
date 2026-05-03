@@ -99,10 +99,6 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	suffix, err := buildHeaderLength(res.HdrLen, fields, p)
-	if err != nil {
-		return nil, err
-	}
 	flagsOff, triggers, err := buildFlagTriggers(res.OptFlags, fields, p)
 	if err != nil {
 		return nil, err
@@ -118,7 +114,6 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 		Consts:            res.Consts,
 		MaxDepth:          res.MaxDepth,
 		ChainEnd:          res.ChainEnd,
-		HeaderLength:      suffix,
 		FlagTriggers:      triggers,
 		FlagsByteOffset:   flagsOff,
 		OptionWalk:        walk,
@@ -134,9 +129,6 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 			return nil, fmt.Errorf("%s: CHAIN_END const %q references unknown field %q", p, res.ChainEnd.Name, res.ChainEnd.FieldName)
 		}
 	}
-	if err := spec.validateHdrLenFieldAlignment(); err != nil {
-		return nil, err
-	}
 	if err := validateLayoutExclusivity(spec); err != nil {
 		return nil, err
 	}
@@ -144,85 +136,17 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 	return spec, nil
 }
 
-// validateHdrLenFieldAlignment cross-checks that the (LenByteOff,
-// LenMask, LenShift) triple in HeaderLength corresponds to exactly
-// one declared field of the primary header. Without this check,
-// editing the header struct without updating the matching HDRLEN_*
-// consts would silently make the trailer codegen read the wrong
-// bits — surfacing as a runtime miscompute rather than a load-time
-// error.
-//
-// The masked window's network-bit position is
-// `LenByteOff*8 + (7-hi)` with width `popcount(mask)` (P4 big-endian
-// bit numbering: byte's MSB = first network bit).
-func (s *ProtocolSpec) validateHdrLenFieldAlignment() error {
-	if s.HeaderLength == nil {
-		return nil
-	}
-	mask := s.HeaderLength.LenMask
-	lo, hi := -1, -1
-	for b := 0; b < 8; b++ {
-		if mask&(1<<b) != 0 {
-			if lo < 0 {
-				lo = b
-			}
-			hi = b
-		}
-	}
-	filled := ((1 << (hi - lo + 1)) - 1) << lo
-	if mask != filled {
-		return fmt.Errorf("%s: HDRLEN_MASK=0x%x is not a contiguous run of 1-bits", s.Source, mask)
-	}
-	if s.HeaderLength.LenShift != lo {
-		return fmt.Errorf("%s: HDRLEN_SHIFT=%d is inconsistent with HDRLEN_MASK=0x%x (expected SHIFT=%d to align bit %d to LSB)", s.Source, s.HeaderLength.LenShift, mask, lo, lo)
-	}
-	width := hi - lo + 1
-	bitStart := s.HeaderLength.LenByteOff*8 + (7 - hi)
-	bitEnd := bitStart + width
-	acc := 0
-	for _, f := range s.Fields {
-		if acc == bitStart && f.Bits == width {
-			return nil
-		}
-		acc += f.Bits
-	}
-	return fmt.Errorf("%s: HDRLEN_BYTE_OFFSET=%d, HDRLEN_MASK=0x%x, HDRLEN_SHIFT=%d select bits [%d, %d) of header %q, which does not match any declared field", s.Source, s.HeaderLength.LenByteOff, mask, s.HeaderLength.LenShift, bitStart, bitEnd, s.HeaderName)
-}
-
-// validateLayoutExclusivity rejects vocab files that combine
-// variable-layout features in ways the codegen does not handle. A
-// parser-state-machine block is the canonical "complex layout"
-// channel and already lets the protocol express aux extracts and
-// per-iteration advances; declarative HDRLEN_* / OPT_TRIGGER_*
-// consts are the simpler channel for primary-header trailers /
-// flag-gated optional fields. Mixing both on the same protocol
-// hits two issues at once:
-//
-//   - genLayerInner dispatches on ParseStateMachine first, so a
-//     parser-machine layer silently ignores HeaderLength and
-//     FlagTriggers — a real bug masquerading as success.
-//   - The semantics overlap (which trailer wins?) is undefined.
-//
-// We refuse the FlagTriggers combination at load time so the silent
-// miss never reaches codegen. HeaderLength is permitted to coexist
-// with a parser machine, but only when the parser machine has exactly
-// one extract: codegen runs the HDRLEN_* trail at the parser's
-// accept landing on the assumption that R4 sits at primary_end there,
-// which only holds for a single-extract entry state. Multi-extract
-// parser machines (ipv6's parse_ext loop, gtp's opt + exts) leave R4
-// advanced past the primary header by accept-landing time, which
-// would silently miscompute the trailer.
+// validateLayoutExclusivity rejects vocab files that combine the
+// flag-triggered optional family with a non-trivial parser block.
+// genLayerInner dispatches on ParseStateMachine first, so the
+// FlagTriggers would silently never run — a real bug masquerading
+// as success. Refuse it at load time.
 func validateLayoutExclusivity(s *ProtocolSpec) error {
 	if s.ParseStateMachine == nil {
 		return nil
 	}
 	if len(s.FlagTriggers) > 0 {
 		return fmt.Errorf("%s: protocol %q declares both a non-trivial parser block and OPT_TRIGGER_* — choose one channel for variable-length layout", s.Source, s.Name)
-	}
-	if s.HeaderLength != nil {
-		if extracts := s.ParseStateMachine.TotalExtracts(); extracts != 1 {
-			return fmt.Errorf("%s: protocol %q pairs a HDRLEN_* trailer with a multi-extract parser machine; the trailer codegen assumes R4 is at the primary header's end at the parser's accept landing, which only holds for a single-extract entry state (got %d extracts)", s.Source, s.Name, extracts)
-		}
 	}
 	return nil
 }
@@ -266,7 +190,6 @@ type classifyResult struct {
 	Consts   []DispatchConst
 	MaxDepth int
 	ChainEnd *ChainEndConst
-	HdrLen   hdrLenConsts
 	OptFlags optFlagConsts
 }
 
@@ -310,29 +233,6 @@ type optWalkConsts struct {
 	kinds       map[string]uint64
 	sizes       map[string]int
 }
-
-// hdrLenConsts is the raw form of <SELF>_HDRLEN_* constants
-// before they are validated as a complete five-tuple. Each set bit in
-// `seen` corresponds to one of the required keys; loadHeaderLength
-// rejects partial declarations.
-type hdrLenConsts struct {
-	ByteOff int
-	Mask    int
-	Shift   int
-	Scale   int
-	Base    int
-	seen    uint8
-}
-
-const (
-	hdrLenByteOffBit uint8 = 1 << iota
-	hdrLenMaskBit
-	hdrLenShiftBit
-	hdrLenScaleBit
-	hdrLenBaseBit
-)
-
-const hdrLenAllBits = hdrLenByteOffBit | hdrLenMaskBit | hdrLenShiftBit | hdrLenScaleBit | hdrLenBaseBit
 
 // setOptFlagsField parses one <SELF>_OPT_* key. Recognised forms:
 //
@@ -510,100 +410,14 @@ func buildOptionWalk(raw *optWalkConsts, file *p4lite.File, protoName, source st
 	return out, nil
 }
 
-// setHdrLenField records one HDRLEN_* key into ve, rejecting
-// duplicates and unknown suffixes. Caller has already verified the
-// const is bit<N>, not bool.
-func setHdrLenField(ve *hdrLenConsts, key string, c *p4lite.Const, source string) error {
-	var bit uint8
-	var dst *int
-	switch key {
-	case "BYTE_OFFSET":
-		bit, dst = hdrLenByteOffBit, &ve.ByteOff
-	case "MASK":
-		bit, dst = hdrLenMaskBit, &ve.Mask
-	case "SHIFT":
-		bit, dst = hdrLenShiftBit, &ve.Shift
-	case "SCALE":
-		bit, dst = hdrLenScaleBit, &ve.Scale
-	case "BASE":
-		bit, dst = hdrLenBaseBit, &ve.Base
-	default:
-		return fmt.Errorf("%s: HDRLEN const %q has unknown suffix %q (expected BYTE_OFFSET|MASK|SHIFT|SCALE|BASE)", source, c.Name, key)
-	}
-	if ve.seen&bit != 0 {
-		return fmt.Errorf("%s: duplicate HDRLEN_%s declaration %q", source, key, c.Name)
-	}
-	ve.seen |= bit
-	*dst = int(c.Int)
-	return nil
-}
-
-// buildHeaderLength promotes the raw hdrLenConsts to a fully
-// validated HeaderLength, or returns nil when the .p4 declared no
-// HDRLEN keys at all. Partial declarations are rejected with a
-// pointer at the missing keys.
-func buildHeaderLength(ve hdrLenConsts, fields []Field, source string) (*HeaderLength, error) {
-	if ve.seen == 0 {
-		return nil, nil
-	}
-	if ve.seen != hdrLenAllBits {
-		var missing []string
-		for _, kv := range []struct {
-			bit  uint8
-			name string
-		}{
-			{hdrLenByteOffBit, "BYTE_OFFSET"},
-			{hdrLenMaskBit, "MASK"},
-			{hdrLenShiftBit, "SHIFT"},
-			{hdrLenScaleBit, "SCALE"},
-			{hdrLenBaseBit, "BASE"},
-		} {
-			if ve.seen&kv.bit == 0 {
-				missing = append(missing, "HDRLEN_"+kv.name)
-			}
-		}
-		return nil, fmt.Errorf("%s: HDRLEN declaration is incomplete (missing %s)", source, strings.Join(missing, ", "))
-	}
-	if ve.Mask == 0 || ve.Mask > 0xFF {
-		return nil, fmt.Errorf("%s: HDRLEN_MASK %#x must be in (0, 0xFF]", source, ve.Mask)
-	}
-	if ve.Shift < 0 || ve.Shift > 7 {
-		return nil, fmt.Errorf("%s: HDRLEN_SHIFT %d must be in [0, 7]", source, ve.Shift)
-	}
-	// Codegen lowers `* Scale` to a left-shift, so Scale must be a
-	// power of two it knows how to encode (codegen.scaleShift table:
-	// 1, 2, 4, 8, 16, 32, 64, 128). Capping at 128 also keeps the
-	// worst-case computed advance ((mask >> shift) << log2(scale))
-	// within 0xFFFF, well clear of int32 overflow.
-	if ve.Scale <= 0 || ve.Scale > 128 || (ve.Scale&(ve.Scale-1)) != 0 {
-		return nil, fmt.Errorf("%s: HDRLEN_SCALE %d must be a power of two in [1, 128]", source, ve.Scale)
-	}
-	if ve.Base < 0 {
-		return nil, fmt.Errorf("%s: HDRLEN_BASE %d must be >= 0 (declared minimum header bytes)", source, ve.Base)
-	}
-	headerBytes := SumBits(fields) / 8
-	if ve.ByteOff < 0 || ve.ByteOff >= headerBytes {
-		return nil, fmt.Errorf("%s: HDRLEN_BYTE_OFFSET %d is out of range for %d-byte primary header", source, ve.ByteOff, headerBytes)
-	}
-	if ve.Base != headerBytes {
-		return nil, fmt.Errorf("%s: HDRLEN_BASE %d must equal the primary header size (%d bytes)", source, ve.Base, headerBytes)
-	}
-	return &HeaderLength{
-		LenByteOff: ve.ByteOff,
-		LenMask:    ve.Mask,
-		LenShift:   ve.Shift,
-		Scale:      ve.Scale,
-		Base:       ve.Base,
-	}, nil
-}
 
 func classifyConsts(cs []*p4lite.Const, protoName, source string) (classifyResult, error) {
 	protoUpper := strings.ToUpper(protoName)
 	res := classifyResult{Consts: make([]DispatchConst, 0, len(cs))}
 	// Reject any duplicate const name regardless of family. Some
-	// families (MAX_DEPTH, CHAIN_END, HDRLEN_*, OPT_*) already
-	// have purpose-specific dup checks, but plain Dispatch consts
-	// (NO_CHECK / SANITY / Field) used to slip through silently —
+	// families (MAX_DEPTH, CHAIN_END, OPT_*) already have purpose-
+	// specific dup checks, but plain Dispatch consts (NO_CHECK /
+	// SANITY / Field) used to slip through silently —
 	// `SelectDispatchConst` would just return whichever copy came
 	// first, masking the typo. p4c-check catches identifier-level
 	// dup in valid P4-16 anyway, but we double-gate here so kunai
@@ -644,14 +458,7 @@ func classifyConsts(cs []*p4lite.Const, protoName, source string) (classifyResul
 			continue
 		}
 		if strings.HasPrefix(rest, "HDRLEN_") {
-			if c.IsBool {
-				return classifyResult{}, fmt.Errorf("%s: HDRLEN const %q must be bit<N>, got bool", source, c.Name)
-			}
-			key := rest[len("HDRLEN_"):]
-			if err := setHdrLenField(&res.HdrLen, key, c, source); err != nil {
-				return classifyResult{}, err
-			}
-			continue
+			return classifyResult{}, fmt.Errorf("%s: HDRLEN_* const family is no longer supported; express the variable trailer with `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)` inside the parser block instead (const %q)", source, c.Name)
 		}
 		if m := reChainEnd.FindStringSubmatch(rest); m != nil {
 			if c.IsBool {

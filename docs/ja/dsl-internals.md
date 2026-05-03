@@ -751,7 +751,7 @@ GTP の opt も同じ: GTP header の E/S/PN flag で有無が決まる、独立
 
 | # | mechanism | declare 方法 | 対応 wire パターン | 例 protocol | codegen 入口 |
 |---|---|---|---|---|---|
-| **1** | **HDRLEN trailer** | `<SELF>_HDRLEN_{BYTE_OFFSET,MASK,SHIFT,SCALE,BASE}` 5 const | primary header の variable trailer | IPv4 (IHL × 4 - 20)、TCP (data_offset × 4 - 20) | `parser_machine.go::emitVariableTrail*` |
+| **1** | **pkt.advance trailer** | parser block の skip-state で `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)` 1 行 | primary header の variable trailer | IPv4 (IHL × 4 - 20)、TCP (data_offset × 4 - 20) | `parser_machine.go::emitVariableTrail*` |
 | **2** | **chain self-loop** | `<SELF>_CHAIN_END_<FIELD>` + `<SELF>_MAX_DEPTH` | A: 全体繰り返し | MPLS (s-bit)、VLAN+、QinQ | `bpfloop.go::chainEndCheck` |
 | **3** | **parser self-loop** | parser block の state 自己 transition | B: 拡張ヘッダ繰り返し | IPv6 ext (`parse_ext` self-loop) | `parser_machine.go` state graph |
 | **4** | **aux header stack** | `out h_t[N] name` + parser state | B/C: wrapper 内要素列 | SRv6 segments、GTP exts | `parser_machine.go` + `emitDynamicStackAddress` |
@@ -761,31 +761,41 @@ GTP の opt も同じ: GTP header の E/S/PN flag で有無が決まる、独立
 
 ユーザーが「可変長」と認識しがちな代表例 4 つの内訳:
 
-- **TCP/IPv4 タイプ** = mechanism 1 (HDRLEN trailer)。TCP はさらに mechanism 7 (TLV walk) を併用して中身を読む
+- **TCP/IPv4 タイプ** = mechanism 1 (pkt.advance trailer)。TCP はさらに mechanism 7 (TLV walk) を併用して中身を読む
 - **MPLS タイプ** = mechanism 2 (chain self-loop)
 - **SRv6 タイプ** = mechanism 4 (aux header stack)
 - **GTP タイプ** = mechanism 5 (gated single aux: `opt`) + mechanism 4 (aux stack: `exts`) の両用い
 
 これに加えて vocab 著者向けに mechanism 3 (IPv6 ext のような異 type ext-header chain) と mechanism 6 (GRE のような flag-triggered optional) と mechanism 7 (TLV walk) が利用できる。
 
-以下、各 mechanism を順に declare 方法で示す。**mechanism 1 (HDRLEN) と mechanism 7 (TLV walk) と mechanism 6 (flag-triggered) は const 宣言だけで自動生成され、parser block を書く必要はない**。残り (chain / parser self-loop / aux / aux stack / gated aux) は parser block + state machine で表現する。
+以下、各 mechanism を順に declare 方法で示す。**mechanism 7 (TLV walk) と mechanism 6 (flag-triggered) は const 宣言だけで自動生成され、parser block を書く必要はない**。残り (mechanism 1 pkt.advance / chain / parser self-loop / aux / aux stack / gated aux) は parser block + state machine で表現する。
 
 (以下の sub-section は文書化の歴史上 1→2→3→5→4→7→6 の順に並んでいる。表の番号で目的の mechanism にジャンプして読むのが楽。)
 
-#### Mechanism 1: HDRLEN trailer (TCP / IPv4 タイプ)
+#### Mechanism 1: pkt.advance trailer (TCP / IPv4 タイプ)
 
-primary header の **末尾に長さ可変の trailer** が付く形。長さは header 内の field (IPv4 IHL、TCP data_offset) × scale で計算できる。const 5 個を declare するだけで、codegen が自動的に R3 で長さ計算 + R4 advance + bound check を emit する。
+primary header の **末尾に長さ可変の trailer** が付く形。長さは header 内の field (IPv4 IHL、TCP data_offset) × scale で計算できる。parser block の skip-state で P4-16 標準の `pkt.advance` template A を 1 行 declare すれば、loader が field 位置 / mask / shift を自動導出して codegen が長さ計算 + R4 advance + bound check を emit する。
 
 ```p4
 // ipv4.p4
-const bit<8> IPV4_HDRLEN_BYTE_OFFSET = 0;     // IHL は byte 0 の下 nibble
-const bit<8> IPV4_HDRLEN_MASK        = 0x0F;
-const bit<8> IPV4_HDRLEN_SHIFT       = 0;
-const bit<8> IPV4_HDRLEN_SCALE       = 4;     // ihl × 4 byte
-const bit<8> IPV4_HDRLEN_BASE        = 20;    // 固定 header 分は引く
+parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition select(hdr.version) {
+            4:       skip_options;
+            default: reject;
+        }
+    }
+    state skip_options {
+        pkt.advance(((bit<32>)(hdr.ihl - 5)) << 5);  // (ihl - 5) × 32 bit = (ihl - 5) × 4 byte
+        transition accept;
+    }
+}
 ```
 
-計算式は `((byte[OFFSET] & MASK) >> SHIFT) * SCALE - BASE` で trailer の byte 数。`< 0` (IHL < 5 等) は loud reject。trailer **そのもの**には dot path で access できない (=「options 領域があることだけ知ってる」状態)。中身を読みたい場合は mechanism 7 (TLV walk) を併用する。
+template の解釈: `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)` を `(field × 2^(S-3) byte) - (K × 2^(S-3) byte)` の trailer 長と読む。`< 0` (IHL < 5 等) は codegen の lower-bound check で loud reject。trailer **そのもの**には dot path で access できない (=「options 領域があることだけ知ってる」状態)。中身を読みたい場合は mechanism 7 (TLV walk) を併用する。
+
+(B-2 以前は `<SELF>_HDRLEN_BYTE_OFFSET / MASK / SHIFT / SCALE / BASE` の 5 const を手書きで宣言してた。これは header struct の field 位置と redundant で、struct を編集すると 5 const がサイレント壊れる footgun だった。B-2 で parser block 経由に統一、HDRLEN_* 系は loud reject。)
 
 #### Mechanism 2: chain self-loop (MPLS タイプ)
 

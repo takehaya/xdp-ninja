@@ -27,30 +27,28 @@ const bit<8>  IPV4_SRV6_NEXT_HEADER = 4;
 // payload — IPv4 uses the well-known 0x0800.
 const bit<16> IPV4_GRE_PROTOCOL_TYPE = 0x0800;
 
-// IPv4 options carry a variable trailer past the 20-byte fixed
-// header: total header length is IHL × 4 bytes (IHL is the lower
-// nibble of byte 0). Codegen reads the byte at offset 0, masks with
-// 0x0F, shifts right 0, multiplies by 4, then subtracts the 20-byte
-// minimum to obtain the options length and advances R4 past it.
-// IHL < 5 falls below MinimumTotal=20 and rejects the packet.
-const bit<8> IPV4_HDRLEN_BYTE_OFFSET = 0;
-const bit<8> IPV4_HDRLEN_MASK        = 0x0F;
-const bit<8> IPV4_HDRLEN_SHIFT       = 0;
-const bit<8> IPV4_HDRLEN_SCALE       = 4;
-const bit<8> IPV4_HDRLEN_BASE        = 20;
-
 // Self-validating parser: `transition select(hdr.version) { ... }`
 // guarantees the first nibble is 4. When a parent layer has no Field
 // dispatch (e.g. MPLS, GTP-U, VXLAN inner Ethernet), resolver allows
 // the chain via DispatchSelfValidating and the runtime check happens
-// here. The IHL trailing is still consumed by the HDRLEN_* family
-// after the parser block accepts.
+// here.
+//
+// The `skip_options` state walks past the IPv4 options trailer using
+// the standard P4-16 `pkt.advance` form. Total header length is
+// IHL × 4 bytes; subtract the 20-byte fixed minimum to obtain the
+// options length. IHL < 5 underflows the `bit<32>` arithmetic, which
+// codegen catches with an explicit lower-bound check before it can
+// advance R4.
 parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version) {
-            4:       accept;
+            4:       skip_options;
             default: reject;
         }
+    }
+    state skip_options {
+        pkt.advance(((bit<32>)(hdr.ihl - 5)) << 5);
+        transition accept;
     }
 }

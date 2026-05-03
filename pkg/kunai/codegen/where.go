@@ -1494,9 +1494,9 @@ func (c *whereCtx) genOptionLookupLoad(ref *ir.FieldRef) (asm.Instructions, erro
 	if opt.ExistsOnly {
 		return nil, fmt.Errorf("%w: option `%s.options.%s.exists` codegen needs the bool-atom parser extension", ErrNotImplemented, ref.Layer.Spec.Name, opt.Name)
 	}
-	vs := ref.Layer.Spec.HeaderLength
+	vs := ref.Layer.Spec.PrimaryAdvanceSkip()
 	if vs == nil {
-		return nil, fmt.Errorf("%w: option lookup needs %q to declare a HDRLEN_* (options length source)", ErrNotImplemented, ref.Layer.Spec.Name)
+		return nil, fmt.Errorf("%w: option lookup needs %q to declare a variable trailer (parser-block pkt.advance)", ErrNotImplemented, ref.Layer.Spec.Name)
 	}
 	primaryBits := vocab.SumBits(ref.Layer.Spec.Fields)
 	if primaryBits%8 != 0 {

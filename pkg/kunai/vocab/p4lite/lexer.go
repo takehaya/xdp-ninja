@@ -42,6 +42,7 @@ const (
 	TokPacketIn
 	TokOut
 	TokExtract
+	TokAdvance
 	TokTrue
 	TokFalse
 	TokLBrace
@@ -57,6 +58,8 @@ const (
 	TokColon
 	TokEquals
 	TokDot
+	TokMinus
+	TokLShift
 )
 
 func (k TokenKind) String() string {
@@ -95,6 +98,8 @@ func (k TokenKind) String() string {
 		return "'out'"
 	case TokExtract:
 		return "'extract'"
+	case TokAdvance:
+		return "'advance'"
 	case TokTrue:
 		return "'true'"
 	case TokFalse:
@@ -125,6 +130,10 @@ func (k TokenKind) String() string {
 		return "'='"
 	case TokDot:
 		return "'.'"
+	case TokMinus:
+		return "'-'"
+	case TokLShift:
+		return "'<<'"
 	}
 	return fmt.Sprintf("TokenKind(%d)", int(k))
 }
@@ -144,6 +153,7 @@ var keywords = map[string]TokenKind{
 	"packet_in":  TokPacketIn,
 	"out":        TokOut,
 	"extract":    TokExtract,
+	"advance":    TokAdvance,
 	"true":       TokTrue,
 	"false":      TokFalse,
 }
@@ -272,6 +282,10 @@ func (l *Lexer) Next() (Token, error) {
 	case ']':
 		return Token{Kind: TokRBracket, Value: "]", Pos: pos}, nil
 	case '<':
+		if l.pos < len(l.src) && l.src[l.pos] == '<' {
+			l.advance()
+			return Token{Kind: TokLShift, Value: "<<", Pos: pos}, nil
+		}
 		return Token{Kind: TokLAngle, Value: "<", Pos: pos}, nil
 	case '>':
 		return Token{Kind: TokRAngle, Value: ">", Pos: pos}, nil
@@ -285,6 +299,8 @@ func (l *Lexer) Next() (Token, error) {
 		return Token{Kind: TokEquals, Value: "=", Pos: pos}, nil
 	case '.':
 		return Token{Kind: TokDot, Value: ".", Pos: pos}, nil
+	case '-':
+		return Token{Kind: TokMinus, Value: "-", Pos: pos}, nil
 	}
 	return Token{}, l.syntaxErr(pos, "unexpected character %q", b)
 }
