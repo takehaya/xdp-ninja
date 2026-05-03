@@ -134,11 +134,59 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 			return nil, fmt.Errorf("%s: CHAIN_END const %q references unknown field %q", p, res.ChainEnd.Name, res.ChainEnd.FieldName)
 		}
 	}
+	if err := spec.validateHdrLenFieldAlignment(); err != nil {
+		return nil, err
+	}
 	if err := validateLayoutExclusivity(spec); err != nil {
 		return nil, err
 	}
 	spec.selfValidating = computeSelfValidating(spec)
 	return spec, nil
+}
+
+// validateHdrLenFieldAlignment cross-checks that the (LenByteOff,
+// LenMask, LenShift) triple in HeaderLength corresponds to exactly
+// one declared field of the primary header. Without this check,
+// editing the header struct without updating the matching HDRLEN_*
+// consts would silently make the trailer codegen read the wrong
+// bits — surfacing as a runtime miscompute rather than a load-time
+// error.
+//
+// The masked window's network-bit position is
+// `LenByteOff*8 + (7-hi)` with width `popcount(mask)` (P4 big-endian
+// bit numbering: byte's MSB = first network bit).
+func (s *ProtocolSpec) validateHdrLenFieldAlignment() error {
+	if s.HeaderLength == nil {
+		return nil
+	}
+	mask := s.HeaderLength.LenMask
+	lo, hi := -1, -1
+	for b := 0; b < 8; b++ {
+		if mask&(1<<b) != 0 {
+			if lo < 0 {
+				lo = b
+			}
+			hi = b
+		}
+	}
+	filled := ((1 << (hi - lo + 1)) - 1) << lo
+	if mask != filled {
+		return fmt.Errorf("%s: HDRLEN_MASK=0x%x is not a contiguous run of 1-bits", s.Source, mask)
+	}
+	if s.HeaderLength.LenShift != lo {
+		return fmt.Errorf("%s: HDRLEN_SHIFT=%d is inconsistent with HDRLEN_MASK=0x%x (expected SHIFT=%d to align bit %d to LSB)", s.Source, s.HeaderLength.LenShift, mask, lo, lo)
+	}
+	width := hi - lo + 1
+	bitStart := s.HeaderLength.LenByteOff*8 + (7 - hi)
+	bitEnd := bitStart + width
+	acc := 0
+	for _, f := range s.Fields {
+		if acc == bitStart && f.Bits == width {
+			return nil
+		}
+		acc += f.Bits
+	}
+	return fmt.Errorf("%s: HDRLEN_BYTE_OFFSET=%d, HDRLEN_MASK=0x%x, HDRLEN_SHIFT=%d select bits [%d, %d) of header %q, which does not match any declared field", s.Source, s.HeaderLength.LenByteOff, mask, s.HeaderLength.LenShift, bitStart, bitEnd, s.HeaderName)
 }
 
 // validateLayoutExclusivity rejects vocab files that combine

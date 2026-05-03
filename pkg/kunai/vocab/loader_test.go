@@ -1051,7 +1051,7 @@ parser F(packet_in pkt, out foo_h h) {
 func TestAllowsParserMachinePlusHDRLEN(t *testing.T) {
 	fsys := fstest.MapFS{
 		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h { bit<8> a; bit<8> b; bit<16> c; }
+header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
 const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
 const bit<8> FOO_HDRLEN_MASK = 0x0F;
 const bit<8> FOO_HDRLEN_SHIFT = 0;
@@ -1060,7 +1060,7 @@ const bit<8> FOO_HDRLEN_BASE = 4;
 parser F(packet_in pkt, out foo_h h) {
   state start {
     pkt.extract(h);
-    transition select(h.a) { 1: accept; default: reject; }
+    transition select(h.ver) { 1: accept; default: reject; }
   }
 }
 `)},
@@ -1091,7 +1091,7 @@ parser F(packet_in pkt, out foo_h h) {
 func TestRejectsParserMachineMultiExtractPlusHDRLEN(t *testing.T) {
 	fsys := fstest.MapFS{
 		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
-header foo_h     { bit<8> a; bit<8> b; bit<16> c; }
+header foo_h     { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
 header foo_ext_h { bit<8> kind; bit<8> _pad; bit<16> data; }
 const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
 const bit<8> FOO_HDRLEN_MASK = 0x0F;
@@ -1101,7 +1101,7 @@ const bit<8> FOO_HDRLEN_BASE = 4;
 parser F(packet_in pkt, out foo_h h, out foo_ext_h[4] exts) {
   state start {
     pkt.extract(h);
-    transition select(h.a) {
+    transition select(h.ver) {
       0: parse_ext;
       default: accept;
     }
@@ -1116,6 +1116,76 @@ parser F(packet_in pkt, out foo_h h, out foo_ext_h[4] exts) {
 	_, err := Load(fsys, "vocab")
 	if err == nil || !strings.Contains(err.Error(), "multi-extract parser machine") {
 		t.Fatalf("expected multi-extract guard error, got %v", err)
+	}
+}
+
+// TestHdrLenFieldAlignmentRejects pins the four ways an HDRLEN_*
+// declaration can fail the field-alignment integrity check. Each
+// row describes one footgun the check catches:
+//   - byte_offset_miss / mask_width_miss: the masked window doesn't
+//     line up with a single declared field
+//   - non_contiguous_mask: the formula assumes one contiguous bit run
+//   - shift_mask_mismatch: SHIFT must equal the mask's lowest set bit
+func TestHdrLenFieldAlignmentRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"byte_offset_miss",
+			`header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
+const bit<8> FOO_HDRLEN_BYTE_OFFSET = 1;
+const bit<8> FOO_HDRLEN_MASK = 0x0F;
+const bit<8> FOO_HDRLEN_SHIFT = 0;
+const bit<8> FOO_HDRLEN_SCALE = 4;
+const bit<8> FOO_HDRLEN_BASE = 4;`,
+			"does not match any declared field",
+		},
+		{
+			"mask_width_miss",
+			`header foo_h { bit<4> ver; bit<4> hdrlen; bit<8> b; bit<16> c; }
+const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
+const bit<8> FOO_HDRLEN_MASK = 0xFF;
+const bit<8> FOO_HDRLEN_SHIFT = 0;
+const bit<8> FOO_HDRLEN_SCALE = 4;
+const bit<8> FOO_HDRLEN_BASE = 4;`,
+			"does not match any declared field",
+		},
+		{
+			"non_contiguous_mask",
+			`header foo_h { bit<8> a; bit<8> b; }
+const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
+const bit<8> FOO_HDRLEN_MASK = 0x55;
+const bit<8> FOO_HDRLEN_SHIFT = 0;
+const bit<8> FOO_HDRLEN_SCALE = 4;
+const bit<8> FOO_HDRLEN_BASE = 2;`,
+			"not a contiguous run",
+		},
+		{
+			"shift_mask_mismatch",
+			`header foo_h { bit<4> hdrlen; bit<4> rsvd; bit<8> b; }
+const bit<8> FOO_HDRLEN_BYTE_OFFSET = 0;
+const bit<8> FOO_HDRLEN_MASK = 0xF0;
+const bit<8> FOO_HDRLEN_SHIFT = 0;
+const bit<8> FOO_HDRLEN_SCALE = 4;
+const bit<8> FOO_HDRLEN_BASE = 2;`,
+			"is inconsistent with HDRLEN_MASK",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{
+				"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+` + tc.body + `
+parser F(packet_in pkt, out foo_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+			}
+			_, err := Load(fsys, "vocab")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want containing %q", err, tc.want)
+			}
+		})
 	}
 }
 
