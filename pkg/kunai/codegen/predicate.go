@@ -181,9 +181,28 @@ func emitIPv4Predicate(pred *ir.Predicate) (asm.Instructions, error) {
 	if pred.Field == nil || pred.Field.Layer == nil || pred.Field.Field == nil {
 		return nil, fmt.Errorf("codegen: IPv4 predicate missing field reference")
 	}
-	if pred.Field.Aux != nil {
-		return nil, fmt.Errorf("%w: IPv4 literal predicate on auxiliary header field is not yet supported", ErrNotImplemented)
+	jumpOp, ok := ipEqualityJumpOp(pred.Op)
+	if !ok {
+		return nil, fmt.Errorf("%w: IPv4 literal supports only == / != (got %s)", ErrNotImplemented, pred.Op)
 	}
+	v4 := pred.Value.V4
+	expected := uint32(byteSwap(uint64(binary.BigEndian.Uint32(v4[:])), 4))
+
+	if pred.Field.Aux != nil {
+		if pred.Field.Aux.FieldBitWidth != 32 {
+			return nil, fmt.Errorf("%w: IPv4 literal needs a 32-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, pred.Field.Layer.Spec.Name, pred.Field.Aux.OutParam, pred.Field.Field.Name, pred.Field.Aux.FieldBitWidth)
+		}
+		prelude, loadAt, err := auxLoadEmitter(pred.Field, r4Anchor(), nil, dslReject)
+		if err != nil {
+			return nil, err
+		}
+		insns := append(asm.Instructions{}, emitAuxGating(pred.Field.Aux.Gating, r4Anchor(), dslReject)...)
+		insns = append(insns, prelude...)
+		insns = append(insns, loadAt(0, asm.Word)...)
+		insns = append(insns, cmpRegEqU32(jumpOp, expected, dslReject)...)
+		return insns, nil
+	}
+
 	fieldOff, bytes, err := findFieldByteOffset(pred.Field.Layer.Spec, pred.Field.Field.Name)
 	if err != nil {
 		return nil, err
@@ -191,12 +210,6 @@ func emitIPv4Predicate(pred *ir.Predicate) (asm.Instructions, error) {
 	if bytes != 4 {
 		return nil, fmt.Errorf("%w: IPv4 literal needs a 4-byte field, got %d-byte %s.%s", ErrNotImplemented, bytes, pred.Field.Layer.Spec.Name, pred.Field.Field.Name)
 	}
-	jumpOp, ok := ipEqualityJumpOp(pred.Op)
-	if !ok {
-		return nil, fmt.Errorf("%w: IPv4 literal supports only == / != (got %s)", ErrNotImplemented, pred.Op)
-	}
-	v4 := pred.Value.V4
-	expected := uint32(byteSwap(uint64(binary.BigEndian.Uint32(v4[:])), 4))
 	insns := emitBoundedLoad(asm.R3, int16(fieldOff), asm.Word, dslReject)
 	insns = append(insns, cmpRegEqU32(jumpOp, expected, dslReject)...)
 	return insns, nil
@@ -211,7 +224,26 @@ func emitIPv4Predicate(pred *ir.Predicate) (asm.Instructions, error) {
 // matches the literal, and lexicographic-compare the high half first.
 func emitIPv6Predicate(pred *ir.Predicate) (asm.Instructions, error) {
 	if pred.Field != nil && pred.Field.Aux != nil {
-		return nil, fmt.Errorf("%w: IPv6 literal predicate on auxiliary header field is not yet supported", ErrNotImplemented)
+		if pred.Op != ast.CmpEq && pred.Op != ast.CmpNeq {
+			return nil, fmt.Errorf("%w: IPv6 ordered cmp on aux header field is not yet supported", ErrNotImplemented)
+		}
+		if pred.Field.Aux.FieldBitWidth != 128 {
+			return nil, fmt.Errorf("%w: IPv6 literal needs a 128-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, pred.Field.Layer.Spec.Name, pred.Field.Aux.OutParam, pred.Field.Field.Name, pred.Field.Aux.FieldBitWidth)
+		}
+		prelude, loadAt, err := auxLoadEmitter(pred.Field, r4Anchor(), nil, dslReject)
+		if err != nil {
+			return nil, err
+		}
+		highBE := binary.BigEndian.Uint64(pred.Value.V6[0:8])
+		lowBE := binary.BigEndian.Uint64(pred.Value.V6[8:16])
+		insns := append(asm.Instructions{}, emitAuxGating(pred.Field.Aux.Gating, r4Anchor(), dslReject)...)
+		insns = append(insns, prelude...)
+		insns = append(insns, multiWordRoute(pred.Op, func(fail string) asm.Instructions {
+			body := append(asm.Instructions{}, ipv6AuxHalfCheck(loadAt, 0, ^uint64(0), highBE, fail)...)
+			body = append(body, ipv6AuxHalfCheck(loadAt, 8, ^uint64(0), lowBE, fail)...)
+			return body
+		})...)
+		return insns, nil
 	}
 	fieldOff, err := requireIPv6Field(pred)
 	if err != nil {
@@ -231,6 +263,27 @@ func emitIPv6Predicate(pred *ir.Predicate) (asm.Instructions, error) {
 		return emitIPv6OrderedCmp(pred, fieldOff), nil
 	}
 	return nil, fmt.Errorf("%w: IPv6 literal cmp op %v not supported", ErrNotImplemented, pred.Op)
+}
+
+// ipv6AuxHalfCheck mirrors ipv6HalfCheck for the aux path: load via
+// the auxLoadAt closure so the address-compute prelude (R5 = element
+// start for dynamic / owner-bound modes) is reused across both halves.
+// R2 is used as mask/host scratch instead of R5 so the element-start
+// address survives between chunks (whereDynamicMultiByte's IPv6 path
+// follows the same convention).
+func ipv6AuxHalfCheck(loadAt auxLoadAt, chunkOff int, mask, host uint64, failLabel string) asm.Instructions {
+	insns := loadAt(chunkOff, asm.DWord)
+	if mask != ^uint64(0) {
+		insns = append(insns,
+			asm.LoadImm(asm.R2, int64(byteSwap(mask, 8)), asm.DWord),
+			asm.And.Reg(asm.R3, asm.R2),
+		)
+	}
+	insns = append(insns,
+		asm.LoadImm(asm.R2, int64(byteSwap(host, 8)), asm.DWord),
+		asm.JNE.Reg(asm.R3, asm.R2, failLabel),
+	)
+	return insns
 }
 
 // emitIPv6OrderedCmp emits the lexicographic compare for `field <op>
@@ -320,13 +373,6 @@ func lowHalfMissJump(op ast.CmpOp) asm.JumpOp {
 //   - /0 with == → emit nothing (matches every address).
 //   - /0 with != → Ja dslReject (matches no address).
 func emitIPv6CIDRPredicate(pred *ir.Predicate) (asm.Instructions, error) {
-	if pred.Field != nil && pred.Field.Aux != nil {
-		return nil, fmt.Errorf("%w: IPv6 CIDR predicate on auxiliary header field is not yet supported", ErrNotImplemented)
-	}
-	fieldOff, err := requireIPv6Field(pred)
-	if err != nil {
-		return nil, err
-	}
 	if err := requireEqualityOp(pred, "IPv6 CIDR"); err != nil {
 		return nil, err
 	}
@@ -346,6 +392,34 @@ func emitIPv6CIDRPredicate(pred *ir.Predicate) (asm.Instructions, error) {
 	maskHighBE, maskLowBE := ipv6PrefixMaskBE(prefix)
 	hostHighBE := binary.BigEndian.Uint64(pred.Value.V6[0:8]) & maskHighBE
 	hostLowBE := binary.BigEndian.Uint64(pred.Value.V6[8:16]) & maskLowBE
+
+	if pred.Field != nil && pred.Field.Aux != nil {
+		if pred.Field.Aux.FieldBitWidth != 128 {
+			return nil, fmt.Errorf("%w: IPv6 CIDR needs a 128-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, pred.Field.Layer.Spec.Name, pred.Field.Aux.OutParam, pred.Field.Field.Name, pred.Field.Aux.FieldBitWidth)
+		}
+		prelude, loadAt, err := auxLoadEmitter(pred.Field, r4Anchor(), nil, dslReject)
+		if err != nil {
+			return nil, err
+		}
+		insns := append(asm.Instructions{}, emitAuxGating(pred.Field.Aux.Gating, r4Anchor(), dslReject)...)
+		insns = append(insns, prelude...)
+		insns = append(insns, multiWordRoute(pred.Op, func(fail string) asm.Instructions {
+			var body asm.Instructions
+			if maskHighBE != 0 {
+				body = append(body, ipv6AuxHalfCheck(loadAt, 0, maskHighBE, hostHighBE, fail)...)
+			}
+			if maskLowBE != 0 {
+				body = append(body, ipv6AuxHalfCheck(loadAt, 8, maskLowBE, hostLowBE, fail)...)
+			}
+			return body
+		})...)
+		return insns, nil
+	}
+
+	fieldOff, err := requireIPv6Field(pred)
+	if err != nil {
+		return nil, err
+	}
 	return multiWordRoute(pred.Op, func(fail string) asm.Instructions {
 		var insns asm.Instructions
 		if maskHighBE != 0 {
@@ -398,9 +472,39 @@ func requireIPv6Field(pred *ir.Predicate) (int, error) {
 // rebuild — both JNE.Imm comparisons fit in 32 bits and so leave R5
 // untouched. The == / != branching shape comes from multiWordRoute.
 func emitMACPredicate(pred *ir.Predicate) (asm.Instructions, error) {
-	if pred.Field != nil && pred.Field.Aux != nil {
-		return nil, fmt.Errorf("%w: MAC literal predicate on auxiliary header field is not yet supported", ErrNotImplemented)
+	if err := requireEqualityOp(pred, "MAC literal"); err != nil {
+		return nil, err
 	}
+	mac := pred.Value.MAC
+	highLE := uint32(byteSwap(uint64(binary.BigEndian.Uint32(mac[0:4])), 4))
+	lowLE := uint16(byteSwap(uint64(binary.BigEndian.Uint16(mac[4:6])), 2))
+
+	if pred.Field != nil && pred.Field.Aux != nil {
+		if pred.Field.Aux.FieldBitWidth != 48 {
+			return nil, fmt.Errorf("%w: MAC literal needs a 48-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, pred.Field.Layer.Spec.Name, pred.Field.Aux.OutParam, pred.Field.Field.Name, pred.Field.Aux.FieldBitWidth)
+		}
+		prelude, loadAt, err := auxLoadEmitter(pred.Field, r4Anchor(), nil, dslReject)
+		if err != nil {
+			return nil, err
+		}
+		insns := append(asm.Instructions{}, emitAuxGating(pred.Field.Aux.Gating, r4Anchor(), dslReject)...)
+		insns = append(insns, prelude...)
+		insns = append(insns, multiWordRoute(pred.Op, func(fail string) asm.Instructions {
+			body := loadAt(0, asm.Word)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(uint64(highLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			body = append(body, loadAt(4, asm.Half)...)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(uint64(lowLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			return body
+		})...)
+		return insns, nil
+	}
+
 	fieldOff, bytes, err := findFieldByteOffset(pred.Field.Layer.Spec, pred.Field.Field.Name)
 	if err != nil {
 		return nil, err
@@ -408,12 +512,6 @@ func emitMACPredicate(pred *ir.Predicate) (asm.Instructions, error) {
 	if bytes != 6 {
 		return nil, fmt.Errorf("%w: MAC literal needs a 6-byte field, got %d-byte %s.%s", ErrNotImplemented, bytes, pred.Field.Layer.Spec.Name, pred.Field.Field.Name)
 	}
-	if err := requireEqualityOp(pred, "MAC literal"); err != nil {
-		return nil, err
-	}
-	mac := pred.Value.MAC
-	highLE := uint32(byteSwap(uint64(binary.BigEndian.Uint32(mac[0:4])), 4))
-	lowLE := uint16(byteSwap(uint64(binary.BigEndian.Uint16(mac[4:6])), 2))
 	return multiWordRoute(pred.Op, func(fail string) asm.Instructions {
 		// Cache the address base in a non-volatile reg so the second
 		// load skips the Mov+Add rebuild. cmpRegEqU16 uses R5 too,
@@ -620,16 +718,6 @@ func ipv6PrefixMaskBE(prefix int) (high, low uint64) {
 //   - /0 with == matches every address — emit nothing.
 //   - /0 with != matches nothing — jump straight to dslReject.
 func emitIPv4CIDRPredicate(pred *ir.Predicate) (asm.Instructions, error) {
-	if pred.Field != nil && pred.Field.Aux != nil {
-		return nil, fmt.Errorf("%w: IPv4 CIDR predicate on auxiliary header field is not yet supported", ErrNotImplemented)
-	}
-	fieldOff, bytes, err := findFieldByteOffset(pred.Field.Layer.Spec, pred.Field.Field.Name)
-	if err != nil {
-		return nil, err
-	}
-	if bytes != 4 {
-		return nil, fmt.Errorf("%w: IPv4 CIDR needs a 4-byte field, got %d-byte %s.%s", ErrNotImplemented, bytes, pred.Field.Layer.Spec.Name, pred.Field.Field.Name)
-	}
 	prefix := pred.Value.Prefix
 	if prefix < 0 || prefix > 32 {
 		return nil, fmt.Errorf("codegen: IPv4 CIDR prefix %d out of [0,32]", prefix)
@@ -651,6 +739,30 @@ func emitIPv4CIDRPredicate(pred *ir.Predicate) (asm.Instructions, error) {
 	hostBE := binary.BigEndian.Uint32(pred.Value.V4[:]) & maskBE
 	expectedLE := uint32(byteSwap(uint64(hostBE), 4))
 	maskLE := uint32(byteSwap(uint64(maskBE), 4))
+
+	if pred.Field != nil && pred.Field.Aux != nil {
+		if pred.Field.Aux.FieldBitWidth != 32 {
+			return nil, fmt.Errorf("%w: IPv4 CIDR needs a 32-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, pred.Field.Layer.Spec.Name, pred.Field.Aux.OutParam, pred.Field.Field.Name, pred.Field.Aux.FieldBitWidth)
+		}
+		prelude, loadAt, err := auxLoadEmitter(pred.Field, r4Anchor(), nil, dslReject)
+		if err != nil {
+			return nil, err
+		}
+		insns := append(asm.Instructions{}, emitAuxGating(pred.Field.Aux.Gating, r4Anchor(), dslReject)...)
+		insns = append(insns, prelude...)
+		insns = append(insns, loadAt(0, asm.Word)...)
+		insns = append(insns, asm.And.Imm(asm.R3, int32(maskLE)))
+		insns = append(insns, cmpRegEqU32(jumpOp, expectedLE, dslReject)...)
+		return insns, nil
+	}
+
+	fieldOff, bytes, err := findFieldByteOffset(pred.Field.Layer.Spec, pred.Field.Field.Name)
+	if err != nil {
+		return nil, err
+	}
+	if bytes != 4 {
+		return nil, fmt.Errorf("%w: IPv4 CIDR needs a 4-byte field, got %d-byte %s.%s", ErrNotImplemented, bytes, pred.Field.Layer.Spec.Name, pred.Field.Field.Name)
+	}
 	insns := emitBoundedLoad(asm.R3, int16(fieldOff), asm.Word, dslReject)
 	insns = append(insns, asm.And.Imm(asm.R3, int32(maskLE)))
 	insns = append(insns, cmpRegEqU32(jumpOp, expectedLE, dslReject)...)

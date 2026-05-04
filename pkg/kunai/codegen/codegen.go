@@ -1303,6 +1303,92 @@ func emitDynamicStackAddress(ref *ir.FieldRef, base layerAnchor, failLabel strin
 	return insns, nil
 }
 
+// auxLoadAt loads `size` bytes from the addressed aux element at
+// `chunkOff` bytes past FieldByteOff into R3. Returned by
+// auxLoadEmitter for the caller to invoke once per word in a multi-
+// byte literal compare.
+type auxLoadAt func(chunkOff int, size asm.Size) asm.Instructions
+
+// resolveAuxSlot returns the dynamic-aux offset slot for an owner-
+// bound aux ref, or ok=false when the owner option is not in the
+// demand set. Bracket-form callers pass nil (owner-bound is reachable
+// only via the where-form 5-part path); where-form callers pass
+// (whereCtx).dynamicOffsetSlotFor.
+type resolveAuxSlot func(*ir.FieldRef) (int16, bool)
+
+// auxLoadEmitter prepares a multi-byte literal load against an aux
+// header field, dispatching on the aux addressing mode:
+//
+//   - Single aux + static stack: prelude is empty, loadAt routes
+//     through emitFieldLoad with anchor + (OffsetInLayer +
+//     Static*ElemSize + FieldByteOff + chunkOff).
+//   - Dynamic stack: prelude is emitDynamicStackAddress (R5 = element
+//     start), loadAt is LoadMem(R3, R5, FieldByteOff+chunkOff, size).
+//   - Owner-bound static stack: prelude loads the owner option's
+//     dynamic-aux slot, sentinel-checks, sets R5 = R0 + slot +
+//     (OffsetAfterOwner + Static*ElemSize); loadAt is the same R5-
+//     relative LDX as the dynamic-stack mode.
+//
+// resolveSlot is consulted only for owner-bound; pass nil from
+// bracket-form callers (the resolver doesn't produce owner-bound
+// AuxRefs through that path).
+func auxLoadEmitter(ref *ir.FieldRef, anchor layerAnchor, resolveSlot resolveAuxSlot, failLabel string) (asm.Instructions, auxLoadAt, error) {
+	if ref == nil || ref.Aux == nil {
+		return nil, nil, fmt.Errorf("codegen: auxLoadEmitter on non-aux FieldRef")
+	}
+	aux := ref.Aux
+	if aux.FieldBitOff%8 != 0 || aux.FieldBitWidth%8 != 0 {
+		return nil, nil, fmt.Errorf("%w: aux field %s.%s.%s not byte-aligned", ErrNotImplemented, ref.Layer.Spec.Name, aux.OutParam, ref.Field.Name)
+	}
+	fieldByteOff := aux.FieldBitOff / 8
+
+	if aux.OwnerOption != nil {
+		if aux.Stack == nil || !aux.Stack.IsStatic {
+			return nil, nil, fmt.Errorf("%w: owner-bound aux %q requires a static stack index", ErrNotImplemented, aux.OutParam)
+		}
+		if resolveSlot == nil {
+			return nil, nil, fmt.Errorf("%w: owner-bound aux %q not addressable from this code path", ErrNotImplemented, aux.OutParam)
+		}
+		slot, ok := resolveSlot(ref)
+		if !ok {
+			return nil, nil, fmt.Errorf("codegen: owner option %q not in demand set for layer %q", aux.OwnerOption.OutParam, ref.Layer.Spec.Name)
+		}
+		elemOff := aux.OffsetAfterOwner + int(aux.Stack.Static)*aux.HeaderSize
+		prelude := asm.Instructions{
+			asm.LoadMem(asm.R3, asm.R10, slot, asm.DWord),
+			asm.JEq.Imm(asm.R3, dynamicAuxSentinel, failLabel),
+			asm.Mov.Reg(asm.R5, asm.R0),
+			asm.Add.Reg(asm.R5, asm.R3),
+			asm.Add.Imm(asm.R5, int32(elemOff)),
+		}
+		return prelude, func(chunkOff int, size asm.Size) asm.Instructions {
+			return asm.Instructions{
+				asm.LoadMem(asm.R3, asm.R5, int16(fieldByteOff+chunkOff), size),
+			}
+		}, nil
+	}
+
+	if aux.Stack != nil && !aux.Stack.IsStatic {
+		prelude, err := emitDynamicStackAddress(ref, anchor, failLabel)
+		if err != nil {
+			return nil, nil, err
+		}
+		return prelude, func(chunkOff int, size asm.Size) asm.Instructions {
+			return asm.Instructions{
+				asm.LoadMem(asm.R3, asm.R5, int16(fieldByteOff+chunkOff), size),
+			}
+		}, nil
+	}
+
+	totalOff := aux.OffsetInLayer + fieldByteOff
+	if aux.Stack != nil && aux.Stack.IsStatic {
+		totalOff += int(aux.Stack.Static) * aux.HeaderSize
+	}
+	return nil, func(chunkOff int, size asm.Size) asm.Instructions {
+		return emitFieldLoad(anchor, totalOff+chunkOff, size)
+	}, nil
+}
+
 // layerAnchor abstracts how to express "the byte offset of the
 // owning layer's start". Three modes:
 //

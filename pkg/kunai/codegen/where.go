@@ -1343,6 +1343,9 @@ func (c *whereCtx) genLiteralCompare(w *ir.Condition, failLabel string) (asm.Ins
 	if !ok {
 		return nil, fmt.Errorf("%w: network literal supports only == / != (got %s)", ErrNotImplemented, w.LiteralOp)
 	}
+	if ref.Aux != nil && ref.Aux.OwnerOption != nil {
+		return c.genOwnerBoundLiteralCompare(w, failLabel)
+	}
 	if ref.Aux != nil && ref.Aux.Stack != nil && !ref.Aux.Stack.IsStatic {
 		return c.genLiteralCompareDynamic(w, failLabel)
 	}
@@ -1401,9 +1404,6 @@ func (c *whereCtx) genLiteralCompare(w *ir.Condition, failLabel string) (asm.Ins
 		})...), nil
 
 	case ast.ValCIDR:
-		if ref.Aux != nil {
-			return nil, fmt.Errorf("%w: CIDR literal predicate on auxiliary header field is not yet supported", ErrNotImplemented)
-		}
 		if w.LiteralValue.AF == 4 {
 			return c.genIPv4CIDRCompare(w, anchor, fieldOff, fieldBytes, failLabel, jumpOp)
 		}
@@ -1491,8 +1491,272 @@ func (c *whereCtx) genLiteralCompareDynamic(w *ir.Condition, failLabel string) (
 			}
 			return insns
 		})
+
+	case ast.ValMAC:
+		if fieldBytes != 6 {
+			return nil, fmt.Errorf("%w: MAC literal needs a 6-byte field, got %d-byte %s.%s.%s", ErrNotImplemented, fieldBytes, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name)
+		}
+		mac := w.LiteralValue.MAC
+		highLE := uint32(byteSwap(uint64(binary.BigEndian.Uint32(mac[0:4])), 4))
+		lowLE := uint16(byteSwap(uint64(binary.BigEndian.Uint16(mac[4:6])), 2))
+		return whereDynamicMultiByte(c, ref, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+			return asm.Instructions{
+				asm.LoadMem(asm.R3, asm.R5, fieldByteOff, asm.Word),
+				asm.LoadImm(asm.R2, int64(uint64(highLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+				asm.LoadMem(asm.R3, asm.R5, fieldByteOff+4, asm.Half),
+				asm.LoadImm(asm.R2, int64(uint64(lowLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			}
+		})
+
+	case ast.ValCIDR:
+		if w.LiteralValue.AF == 4 {
+			return c.genDynamicCIDRv4(w, ref, fieldByteOff, fieldBytes, failLabel)
+		}
+		return c.genDynamicCIDRv6(w, ref, fieldByteOff, fieldBytes, failLabel)
 	}
 	return nil, fmt.Errorf("%w: dynamic-index aux compare for literal kind %v", ErrNotImplemented, w.LiteralValue.Kind)
+}
+
+func (c *whereCtx) genDynamicCIDRv4(w *ir.Condition, ref *ir.FieldRef, fieldByteOff int16, fieldBytes int, failLabel string) (asm.Instructions, error) {
+	if fieldBytes != 4 {
+		return nil, fmt.Errorf("%w: IPv4 CIDR needs a 4-byte field, got %d-byte %s.%s.%s", ErrNotImplemented, fieldBytes, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name)
+	}
+	prefix := w.LiteralValue.Prefix
+	if prefix < 0 || prefix > 32 {
+		return nil, fmt.Errorf("codegen: IPv4 CIDR prefix %d out of [0,32]", prefix)
+	}
+	jumpOp, _ := ipEqualityJumpOp(w.LiteralOp)
+	if prefix == 0 {
+		if w.LiteralOp == ast.CmpEq {
+			return nil, nil
+		}
+		return asm.Instructions{asm.Ja.Label(failLabel)}, nil
+	}
+	maskBE := uint32(0xFFFFFFFF) << (32 - prefix)
+	hostBE := binary.BigEndian.Uint32(w.LiteralValue.V4[:]) & maskBE
+	maskLE := uint32(byteSwap(uint64(maskBE), 4))
+	hostLE := uint32(byteSwap(uint64(hostBE), 4))
+	if prefix == 32 {
+		return whereDynamicMultiByte(c, ref, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+			return append(asm.Instructions{
+				asm.LoadMem(asm.R3, asm.R5, fieldByteOff, asm.Word),
+			}, cmpRegEqU32(jumpOp, hostLE, fail)...)
+		})
+	}
+	return whereDynamicMultiByte(c, ref, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+		insns := asm.Instructions{
+			asm.LoadMem(asm.R3, asm.R5, fieldByteOff, asm.Word),
+			asm.And.Imm(asm.R3, int32(maskLE)),
+		}
+		insns = append(insns, cmpRegEqU32(asm.JNE, hostLE, fail)...)
+		return insns
+	})
+}
+
+func (c *whereCtx) genDynamicCIDRv6(w *ir.Condition, ref *ir.FieldRef, fieldByteOff int16, fieldBytes int, failLabel string) (asm.Instructions, error) {
+	if fieldBytes != 16 {
+		return nil, fmt.Errorf("%w: IPv6 CIDR needs a 16-byte field, got %d-byte %s.%s.%s", ErrNotImplemented, fieldBytes, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name)
+	}
+	prefix := w.LiteralValue.Prefix
+	if prefix < 0 || prefix > 128 {
+		return nil, fmt.Errorf("codegen: IPv6 CIDR prefix %d out of [0,128]", prefix)
+	}
+	if prefix == 0 {
+		if w.LiteralOp == ast.CmpEq {
+			return nil, nil
+		}
+		return asm.Instructions{asm.Ja.Label(failLabel)}, nil
+	}
+	maskHighBE, maskLowBE := ipv6PrefixMaskBE(prefix)
+	hostHighBE := binary.BigEndian.Uint64(w.LiteralValue.V6[0:8]) & maskHighBE
+	hostLowBE := binary.BigEndian.Uint64(w.LiteralValue.V6[8:16]) & maskLowBE
+	return whereDynamicMultiByte(c, ref, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+		var insns asm.Instructions
+		if maskHighBE != 0 {
+			insns = append(insns,
+				asm.LoadMem(asm.R3, asm.R5, fieldByteOff, asm.DWord),
+			)
+			if maskHighBE != ^uint64(0) {
+				insns = append(insns,
+					asm.LoadImm(asm.R2, int64(byteSwap(maskHighBE, 8)), asm.DWord),
+					asm.And.Reg(asm.R3, asm.R2),
+				)
+			}
+			insns = append(insns,
+				asm.LoadImm(asm.R2, int64(byteSwap(hostHighBE, 8)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+		}
+		if maskLowBE != 0 {
+			insns = append(insns,
+				asm.LoadMem(asm.R3, asm.R5, fieldByteOff+8, asm.DWord),
+			)
+			if maskLowBE != ^uint64(0) {
+				insns = append(insns,
+					asm.LoadImm(asm.R2, int64(byteSwap(maskLowBE, 8)), asm.DWord),
+					asm.And.Reg(asm.R3, asm.R2),
+				)
+			}
+			insns = append(insns,
+				asm.LoadImm(asm.R2, int64(byteSwap(hostLowBE, 8)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+		}
+		return insns
+	})
+}
+
+// genOwnerBoundLiteralCompare emits a literal compare against an
+// owner-bound static-stack aux field (B-4 SACK / future RR). The
+// auxLoadEmitter prelude loads the owner option's per-packet base
+// from its dynamic-aux slot, sentinel-checks (option absent → fail),
+// and lands R5 = R0 + slot + (OffsetAfterOwner + Static*ElemSize).
+// Per-kind body issues R5-relative LDX at FieldByteOff + chunkOff
+// for each word in the literal.
+func (c *whereCtx) genOwnerBoundLiteralCompare(w *ir.Condition, failLabel string) (asm.Instructions, error) {
+	ref := w.LiteralField
+	jumpOp, _ := ipEqualityJumpOp(w.LiteralOp)
+	anchor, err := c.layerAnchorFor(ref.Layer)
+	if err != nil {
+		return nil, err
+	}
+	prelude, loadAt, err := auxLoadEmitter(ref, anchor, c.dynamicOffsetSlotFor, failLabel)
+	if err != nil {
+		return nil, err
+	}
+
+	switch w.LiteralValue.Kind {
+	case ast.ValIPv4:
+		if ref.Aux.FieldBitWidth != 32 {
+			return nil, fmt.Errorf("%w: IPv4 literal needs a 32-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name, ref.Aux.FieldBitWidth)
+		}
+		v4 := w.LiteralValue.V4
+		expected := uint32(byteSwap(uint64(binary.BigEndian.Uint32(v4[:])), 4))
+		insns := append(asm.Instructions{}, prelude...)
+		insns = append(insns, loadAt(0, asm.Word)...)
+		insns = append(insns, cmpRegEqU32(jumpOp, expected, failLabel)...)
+		return insns, nil
+
+	case ast.ValIPv6:
+		if ref.Aux.FieldBitWidth != 128 {
+			return nil, fmt.Errorf("%w: IPv6 literal needs a 128-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name, ref.Aux.FieldBitWidth)
+		}
+		highBE := binary.BigEndian.Uint64(w.LiteralValue.V6[0:8])
+		lowBE := binary.BigEndian.Uint64(w.LiteralValue.V6[8:16])
+		insns := append(asm.Instructions{}, prelude...)
+		insns = append(insns, whereMultiWordRoute(c, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+			body := loadAt(0, asm.DWord)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(byteSwap(highBE, 8)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			body = append(body, loadAt(8, asm.DWord)...)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(byteSwap(lowBE, 8)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			return body
+		})...)
+		return insns, nil
+
+	case ast.ValMAC:
+		if ref.Aux.FieldBitWidth != 48 {
+			return nil, fmt.Errorf("%w: MAC literal needs a 48-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name, ref.Aux.FieldBitWidth)
+		}
+		mac := w.LiteralValue.MAC
+		highLE := uint32(byteSwap(uint64(binary.BigEndian.Uint32(mac[0:4])), 4))
+		lowLE := uint16(byteSwap(uint64(binary.BigEndian.Uint16(mac[4:6])), 2))
+		insns := append(asm.Instructions{}, prelude...)
+		insns = append(insns, whereMultiWordRoute(c, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+			body := loadAt(0, asm.Word)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(uint64(highLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			body = append(body, loadAt(4, asm.Half)...)
+			body = append(body,
+				asm.LoadImm(asm.R2, int64(uint64(lowLE)), asm.DWord),
+				asm.JNE.Reg(asm.R3, asm.R2, fail),
+			)
+			return body
+		})...)
+		return insns, nil
+
+	case ast.ValCIDR:
+		if w.LiteralValue.AF == 4 {
+			return c.genOwnerBoundCIDRv4(w, prelude, loadAt, failLabel, jumpOp)
+		}
+		return c.genOwnerBoundCIDRv6(w, prelude, loadAt, failLabel)
+	}
+	return nil, fmt.Errorf("%w: owner-bound aux compare for literal kind %v", ErrNotImplemented, w.LiteralValue.Kind)
+}
+
+func (c *whereCtx) genOwnerBoundCIDRv4(w *ir.Condition, prelude asm.Instructions, loadAt auxLoadAt, failLabel string, jumpOp asm.JumpOp) (asm.Instructions, error) {
+	ref := w.LiteralField
+	if ref.Aux.FieldBitWidth != 32 {
+		return nil, fmt.Errorf("%w: IPv4 CIDR needs a 32-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name, ref.Aux.FieldBitWidth)
+	}
+	prefix := w.LiteralValue.Prefix
+	if prefix < 0 || prefix > 32 {
+		return nil, fmt.Errorf("codegen: IPv4 CIDR prefix %d out of [0,32]", prefix)
+	}
+	if prefix == 0 {
+		if w.LiteralOp == ast.CmpEq {
+			return prelude, nil
+		}
+		return append(prelude, asm.Ja.Label(failLabel)), nil
+	}
+	maskBE := uint32(0xFFFFFFFF) << (32 - prefix)
+	hostBE := binary.BigEndian.Uint32(w.LiteralValue.V4[:]) & maskBE
+	maskLE := uint32(byteSwap(uint64(maskBE), 4))
+	hostLE := uint32(byteSwap(uint64(hostBE), 4))
+	insns := append(asm.Instructions{}, prelude...)
+	if prefix == 32 {
+		insns = append(insns, loadAt(0, asm.Word)...)
+		insns = append(insns, cmpRegEqU32(jumpOp, hostLE, failLabel)...)
+		return insns, nil
+	}
+	insns = append(insns, whereMultiWordRoute(c, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+		body := loadAt(0, asm.Word)
+		body = append(body, asm.And.Imm(asm.R3, int32(maskLE)))
+		body = append(body, cmpRegEqU32(asm.JNE, hostLE, fail)...)
+		return body
+	})...)
+	return insns, nil
+}
+
+func (c *whereCtx) genOwnerBoundCIDRv6(w *ir.Condition, prelude asm.Instructions, loadAt auxLoadAt, failLabel string) (asm.Instructions, error) {
+	ref := w.LiteralField
+	if ref.Aux.FieldBitWidth != 128 {
+		return nil, fmt.Errorf("%w: IPv6 CIDR needs a 128-bit field, got %s.%s.%s (%d bits)", ErrNotImplemented, ref.Layer.Spec.Name, ref.Aux.OutParam, ref.Field.Name, ref.Aux.FieldBitWidth)
+	}
+	prefix := w.LiteralValue.Prefix
+	if prefix < 0 || prefix > 128 {
+		return nil, fmt.Errorf("codegen: IPv6 CIDR prefix %d out of [0,128]", prefix)
+	}
+	if prefix == 0 {
+		if w.LiteralOp == ast.CmpEq {
+			return prelude, nil
+		}
+		return append(prelude, asm.Ja.Label(failLabel)), nil
+	}
+	maskHighBE, maskLowBE := ipv6PrefixMaskBE(prefix)
+	hostHighBE := binary.BigEndian.Uint64(w.LiteralValue.V6[0:8]) & maskHighBE
+	hostLowBE := binary.BigEndian.Uint64(w.LiteralValue.V6[8:16]) & maskLowBE
+	insns := append(asm.Instructions{}, prelude...)
+	insns = append(insns, whereMultiWordRoute(c, w.LiteralOp, failLabel, func(fail string) asm.Instructions {
+		var body asm.Instructions
+		if maskHighBE != 0 {
+			body = append(body, ipv6AuxHalfCheck(loadAt, 0, maskHighBE, hostHighBE, fail)...)
+		}
+		if maskLowBE != 0 {
+			body = append(body, ipv6AuxHalfCheck(loadAt, 8, maskLowBE, hostLowBE, fail)...)
+		}
+		return body
+	})...)
+	return insns, nil
 }
 
 // dynamicOffsetSlotFor reports the stack slot a FieldRef should
