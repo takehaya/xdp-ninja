@@ -205,6 +205,53 @@ func TestAuxStackSrv6SegmentsStaticIndex(t *testing.T) {
 	r.MustReject(t, mismatch, "first segment != fc00::1 (= fc00::beef)")
 }
 
+// TestAuxStackSrv6SegmentsStaticCIDRMatch pins the static-stack +
+// IPv6 CIDR aux combination — `srv6.segments[0].addr == fc00::/16`
+// emits the same R5 = layer_anchor + OffsetInLayer + Static*ElemSize
+// shape as the host case, then AND-masks the half words before the
+// per-half compare. Mirrors TestAuxStackSrv6SegmentsStaticIndex with
+// a prefix match.
+func TestAuxStackSrv6SegmentsStaticCIDRMatch(t *testing.T) {
+	r := New(t, "eth/ipv6/srv6/tcp where srv6.segments[0].addr == fc00::/16")
+	matchPkt := BuildSRv6(t, SRv6Opts{
+		Segments:        []net.IP{net.ParseIP("fc00:abcd::1")},
+		InnerNextHeader: 6,
+	})
+	r.MustMatch(t, matchPkt, "first segment in fc00::/16")
+
+	mismatch := BuildSRv6(t, SRv6Opts{
+		Segments:        []net.IP{net.ParseIP("fd00::1")},
+		InnerNextHeader: 6,
+	})
+	r.MustReject(t, mismatch, "first segment in fd00::/16, not fc00::/16")
+}
+
+// TestAuxStackSrv6SegmentsAnyCIDRMatch combines the `any(...)`
+// quantifier with an IPv6 CIDR literal — the rebind path turns the
+// iterator into a static index per iter, and the per-iter body
+// emits the same masked half compare shape as the static-index case.
+func TestAuxStackSrv6SegmentsAnyCIDRMatch(t *testing.T) {
+	r := New(t, "eth/ipv6/srv6/tcp where any(srv6.segments.addr == 2001:db8::/32)")
+	matchPkt := BuildSRv6(t, SRv6Opts{
+		Segments: []net.IP{
+			net.ParseIP("fc00::1"),
+			net.ParseIP("2001:db8:abcd::42"),
+			net.ParseIP("fc00::3"),
+		},
+		InnerNextHeader: 6,
+	})
+	r.MustMatch(t, matchPkt, "any(segments.addr in 2001:db8::/32) — middle segment matches")
+
+	missPkt := BuildSRv6(t, SRv6Opts{
+		Segments: []net.IP{
+			net.ParseIP("fc00::1"),
+			net.ParseIP("fd00::1"),
+		},
+		InnerNextHeader: 6,
+	})
+	r.MustReject(t, missPkt, "any(segments.addr in 2001:db8::/32) — no segment matches")
+}
+
 // TestAuxStackSrv6SegmentsAnyMatch covers the `any(...)` quantifier:
 // the iter target is srv6.segments and the predicate fires when at
 // least one segment equals the literal. Static unrolls 8 iterations
