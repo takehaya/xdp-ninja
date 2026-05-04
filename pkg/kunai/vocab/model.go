@@ -301,6 +301,11 @@ type ParseStateMachine struct {
 	EntryIdx   int            // index of the "start" state
 	HeaderRefs map[string]*p4lite.Header
 	StackRefs  map[string]*HeaderStack // out-stack param name → resolved stack
+	// Counters lists the `ParserCounter() <name>;` instances declared
+	// at the parser block scope, in source order. Codegen allocates
+	// one stack slot per counter; loader scope-checks every counter
+	// op against this list so typos surface as a load error.
+	Counters []CounterInst
 	// AuxLayouts maps each non-stack `out` parameter name to its byte
 	// position within the layer plus the (optional) gating predicate
 	// that decides whether the aux is extracted on a given packet's
@@ -309,6 +314,14 @@ type ParseStateMachine struct {
 	// gating condition. nil entries are absent — a missing key means
 	// the corresponding out parameter is a stack (StackRefs).
 	AuxLayouts map[string]*AuxLayout
+}
+
+// CounterInst is the in-machine handle for one ParserCounter
+// instance. The slot allocator (codegen) maps Name → stack offset;
+// the loader only records the declaration order.
+type CounterInst struct {
+	Name string
+	Pos  p4lite.Position
 }
 
 // AuxLayout is the per-aux summary needed by predicate codegen.
@@ -424,6 +437,7 @@ type ParseState struct {
 	Name          string
 	Extracts      []ExtractOp
 	Advances      []AdvanceOp
+	Counters      []CounterOp
 	Trans         TransitionOp
 	OffsetAtEntry int
 	Pos           p4lite.Position
@@ -479,6 +493,30 @@ type AdvanceOp struct {
 	Pos          p4lite.Position
 }
 
+// CounterOpKind tags CounterOp with which ParserCounter method the
+// loader lowered. See p4lite.CounterCallKind for the source-form
+// description; CounterOpSet's Skip mirrors AdvanceOpField's so
+// codegen reuses the same byte-expression load path.
+type CounterOpKind int
+
+const (
+	CounterOpSet CounterOpKind = iota
+	CounterOpDecrement
+)
+
+// CounterOp is one ParserCounter method call inside a parser-state
+// body. Counter must match one of ParseStateMachine.Counters; the
+// loader scope-checks so unknown names fail at build time.
+type CounterOp struct {
+	Kind         CounterOpKind
+	Counter      string
+	Target       string        // CounterOpSet only
+	FieldName    string        // CounterOpSet only
+	Skip         *HeaderLength // CounterOpSet only
+	LiteralBytes int           // CounterOpDecrement only
+	Pos          p4lite.Position
+}
+
 // TransKind enumerates the four shapes of a parser-state
 // transition. Mirrors p4lite.TransKind so consumers don't need to
 // import p4lite.
@@ -525,6 +563,11 @@ const (
 	// R4 and R4 is unchanged. MVP supports only `bit<8>`
 	// lookaheads (single-byte LDX in codegen).
 	SelectKeyLookahead
+	// SelectKeyCounterIsZero reads a ParserCounter slot and dispatches
+	// on whether it has reached zero. The matching MatchVal slots are
+	// IsBool-tagged with Bool == true / false. Codegen folds this into
+	// a JEQ on the counter slot.
+	SelectKeyCounterIsZero
 )
 
 // SelectKey is one slot of a SelectOp's key tuple. The Kind
@@ -536,7 +579,9 @@ type SelectKey struct {
 	Field FieldRef
 	// SelectKeyLookahead only.
 	Bits int // peek width (MVP cap = 8)
-	Pos  p4lite.Position
+	// SelectKeyCounterIsZero only — counter instance name.
+	Counter string
+	Pos     p4lite.Position
 }
 
 // SelectCase is one `(v1, v2, ...): target;` line of a `transition
@@ -547,9 +592,13 @@ type SelectCase struct {
 	Pos    p4lite.Position
 }
 
-// MatchVal is one slot of a SelectCase keyset.
+// MatchVal is one slot of a SelectCase keyset. IsBool/Bool carry the
+// boolean literal cases needed by SelectKeyCounterIsZero; integer
+// keysets leave them zero-valued.
 type MatchVal struct {
 	IsWildcard bool
+	IsBool     bool
+	Bool       bool
 	Value      uint64
 }
 

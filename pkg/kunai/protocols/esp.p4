@@ -18,7 +18,7 @@ header esp_h {
 const bit<8> ESP_IPV4_PROTOCOL    = 50;
 const bit<8> ESP_IPV6_NEXT_HEADER = 50;
 
-parser EspFragment(packet_in pkt, out esp_h hdr) {
+parser EspParser(packet_in pkt, out esp_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

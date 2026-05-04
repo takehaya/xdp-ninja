@@ -9,3 +9,10 @@ header vxlan_h {
 
 // Dispatch from UDP via the IANA-assigned destination port.
 const bit<16> VXLAN_UDP_DPORT = 4789;
+
+parser VxlanParser(packet_in pkt, out vxlan_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}

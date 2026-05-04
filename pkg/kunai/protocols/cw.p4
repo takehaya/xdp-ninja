@@ -11,3 +11,10 @@ header cw_h {
 }
 
 const bool CW_MPLS_NO_CHECK = true;
+
+parser CwParser(packet_in pkt, out cw_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}

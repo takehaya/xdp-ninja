@@ -33,7 +33,7 @@ header srv6_seg_h {
 // distinct chain element (e.g. `eth/ipv6/srv6/tcp`).
 const bit<8> SRV6_IPV6_NEXT_HEADER = 43;
 
-parser SRv6Fragment(packet_in pkt,
+parser SRv6Parser(packet_in pkt,
                     out srv6_h        hdr,
                     out srv6_seg_h[8] segments) {
     state start {

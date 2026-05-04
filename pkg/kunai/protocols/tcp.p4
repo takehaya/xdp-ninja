@@ -35,6 +35,13 @@ const bit<8> TCP_SRV6_NEXT_HEADER = 6;
 // Predicate codegen reads each option's recorded offset directly
 // without re-walking.
 //
+// Caveat: EOL (kind=0) accepts immediately, so R4 stops at the EOL
+// byte rather than draining to the data_offset-bounded trailer end.
+// Harmless today because TCP is a terminal layer (no `tcp/<inner>`
+// chain reads R4 past the trailer); future inner-protocol support
+// would need a ParserCounter-driven walk that drains residue past
+// EOL.
+//
 // Each option's identity (kind value) and total wire size live in
 // the parser block itself: the `transition select(...)` case label
 // pins the kind, the `header tcp_opt_<name>_h` decl pins the size.
@@ -60,12 +67,14 @@ header tcp_opt_sack_perm_h {
     bit<8> length;
 }
 
-// Timestamps (kind=8, RFC 7323 §3): val + ecr (each 32-bit).
+// Timestamps (kind=8, RFC 7323 §3): tsval + tsecr (each 32-bit).
+// Field names match the RFC's TSval / TSecr nomenclature so DSL
+// references like `tcp.options.TS.tsval` cite the spec verbatim.
 header tcp_opt_ts_h {
     bit<8>  kind;
     bit<8>  length;
-    bit<32> val;
-    bit<32> ecr;
+    bit<32> tsval;
+    bit<32> tsecr;
 }
 
 // TCP options trailer is at most 40 bytes (data_offset = 15 → 60 byte
@@ -75,7 +84,7 @@ header tcp_opt_ts_h {
 // 32 covers every well-formed TCP packet observed in the wild.
 const bit<8> TCP_PARSER_MAX_DEPTH = 32;
 
-parser TcpFragment(packet_in pkt,
+parser TcpParser(packet_in pkt,
                    out tcp_h               hdr,
                    out tcp_opt_mss_h       mss,
                    out tcp_opt_ws_h        ws,

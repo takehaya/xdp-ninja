@@ -88,6 +88,23 @@ func TestSubsetRejectsParserDirectionsBeyondMVP(t *testing.T) {
 	}
 }
 
+func TestSubsetAcceptsExternDeclaration(t *testing.T) {
+	// `extern ParserCounter { ... }` is the P4-16 standard way to
+	// import the ParserCounter primitive (TNA arch lives there). The
+	// body is opaque to p4lite — we just balance braces — so the
+	// example below mirrors the TNA spec without us modelling void/
+	// directions/method overloads.
+	src := `extern ParserCounter {
+		ParserCounter();
+		void set(in bit<8> value);
+		void decrement(in bit<8> value);
+		bool is_zero();
+	}`
+	if _, err := Parse([]byte(src), "t.p4"); err != nil {
+		t.Fatalf("extern ParserCounter should parse: %v", err)
+	}
+}
+
 func TestSubsetRejectsParserStatementsBeyondExtract(t *testing.T) {
 	// Real P4 lets parser states do `verify(...)`, `var = expr`, and
 	// conditional / block statements. p4lite knows only extract and
@@ -176,7 +193,7 @@ func TestSubsetMVPKeywordRejectionIsTargeted(t *testing.T) {
 	// The lexer's rejectedKeywords list raises a *targeted* error
 	// rather than a generic "unexpected token" so vocab authors can
 	// see which P4 feature is unsupported.
-	for _, kw := range []string{"action", "table", "control", "apply", "extern"} {
+	for _, kw := range []string{"action", "table", "control", "apply"} {
 		_, err := Parse([]byte(kw+" Foo {}"), "t.p4")
 		if err == nil {
 			t.Errorf("%s should be rejected", kw)

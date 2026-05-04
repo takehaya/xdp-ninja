@@ -13,7 +13,7 @@ const bit<8> UDP_IPV6_NEXT_HEADER = 17;
 // SRv6 dispatches to UDP via SRH.next_header.
 const bit<8> UDP_SRV6_NEXT_HEADER = 17;
 
-parser UdpFragment(packet_in pkt, out udp_h hdr) {
+parser UdpParser(packet_in pkt, out udp_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

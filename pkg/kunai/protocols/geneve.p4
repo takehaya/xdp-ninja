@@ -14,3 +14,10 @@ header geneve_h {
 
 // Dispatch from UDP via the IANA-assigned destination port.
 const bit<16> GENEVE_UDP_DPORT = 6081;
+
+parser GeneveParser(packet_in pkt, out geneve_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}

@@ -44,6 +44,8 @@ const (
 	TokExtract
 	TokAdvance
 	TokLookahead
+	TokExtern
+	TokParserCounter
 	TokTrue
 	TokFalse
 	TokLBrace
@@ -103,6 +105,10 @@ func (k TokenKind) String() string {
 		return "'advance'"
 	case TokLookahead:
 		return "'lookahead'"
+	case TokExtern:
+		return "'extern'"
+	case TokParserCounter:
+		return "'ParserCounter'"
 	case TokTrue:
 		return "'true'"
 	case TokFalse:
@@ -142,32 +148,36 @@ func (k TokenKind) String() string {
 }
 
 var keywords = map[string]TokenKind{
-	"header":     TokHeader,
-	"const":      TokConst,
-	"parser":     TokParser,
-	"state":      TokState,
-	"transition": TokTransition,
-	"select":     TokSelect,
-	"default":    TokDefault,
-	"accept":     TokAccept,
-	"reject":     TokReject,
-	"bit":        TokBit,
-	"bool":       TokBool,
-	"packet_in":  TokPacketIn,
-	"out":        TokOut,
-	"extract":    TokExtract,
-	"advance":    TokAdvance,
-	"lookahead":  TokLookahead,
-	"true":       TokTrue,
-	"false":      TokFalse,
+	"header":        TokHeader,
+	"const":         TokConst,
+	"parser":        TokParser,
+	"state":         TokState,
+	"transition":    TokTransition,
+	"select":        TokSelect,
+	"default":       TokDefault,
+	"accept":        TokAccept,
+	"reject":        TokReject,
+	"bit":           TokBit,
+	"bool":          TokBool,
+	"packet_in":     TokPacketIn,
+	"out":           TokOut,
+	"extract":       TokExtract,
+	"advance":       TokAdvance,
+	"lookahead":     TokLookahead,
+	"extern":        TokExtern,
+	"ParserCounter": TokParserCounter,
+	"true":          TokTrue,
+	"false":         TokFalse,
 }
 
+// rejectedKeywords names full-P4-16 constructs that p4lite has no
+// model for. `extern` is accepted (its body is opaque-skipped) so
+// vocab files can declare ParserCounter for p4c parse-check.
 var rejectedKeywords = map[string]bool{
 	"action":  true,
 	"table":   true,
 	"control": true,
 	"apply":   true,
-	"extern":  true,
 }
 
 type Token struct {

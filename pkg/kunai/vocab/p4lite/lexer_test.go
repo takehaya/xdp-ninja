@@ -80,7 +80,7 @@ func TestLexerCommentsSkipped(t *testing.T) {
 }
 
 func TestLexerRejectsReservedKeywords(t *testing.T) {
-	for _, kw := range []string{"action", "table", "control", "apply", "extern"} {
+	for _, kw := range []string{"action", "table", "control", "apply"} {
 		_, err := NewLexer([]byte(kw), "test.p4").Next()
 		if err == nil {
 			t.Errorf("expected error for reserved keyword %q", kw)

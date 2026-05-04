@@ -17,6 +17,7 @@ import (
 	"github.com/takehaya/xdp-ninja/pkg/kunai/dslvocab"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/parser"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/resolve"
+	"github.com/takehaya/xdp-ninja/pkg/kunai/vocab"
 )
 
 // Compile parses a DSL expression against the bundled protocol
@@ -45,6 +46,13 @@ func Compile(expr string, caps codegen.Capabilities) (codegen.Output, error) {
 	if err != nil {
 		return codegen.Output{}, err
 	}
+	return CompileWithVocab(expr, v, caps)
+}
+
+// CompileWithVocab is Compile against a caller-supplied vocabulary
+// map — primarily a test-helper for exercising codegen shapes on
+// synthetic .p4 inputs. Production code should prefer Compile.
+func CompileWithVocab(expr string, v map[string]*vocab.ProtocolSpec, caps codegen.Capabilities) (codegen.Output, error) {
 	f, err := parser.Parse(expr, "", reservedLabels(caps))
 	if err != nil {
 		return codegen.Output{}, err

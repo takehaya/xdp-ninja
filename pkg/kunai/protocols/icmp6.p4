@@ -8,7 +8,7 @@ header icmp6_h {
 
 const bit<8> ICMP6_IPV6_NEXT_HEADER = 58;
 
-parser Icmp6Fragment(packet_in pkt, out icmp6_h hdr) {
+parser Icmp6Parser(packet_in pkt, out icmp6_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

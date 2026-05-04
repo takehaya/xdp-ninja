@@ -87,6 +87,12 @@ func (p *parser) parseFile() (*File, error) {
 				return nil, err
 			}
 			f.Consts = append(f.Consts, c)
+		case TokExtern:
+			ex, err := p.parseExtern()
+			if err != nil {
+				return nil, err
+			}
+			f.Externs = append(f.Externs, ex)
 		case TokParser:
 			par, err := p.parseParser()
 			if err != nil {
@@ -94,10 +100,50 @@ func (p *parser) parseFile() (*File, error) {
 			}
 			f.Parsers = append(f.Parsers, par)
 		default:
-			return nil, p.errorf(p.cur.Pos, "expected 'header', 'const', or 'parser' at top level, got %s (%q)", p.cur.Kind, p.cur.Value)
+			return nil, p.errorf(p.cur.Pos, "expected 'header', 'const', 'extern', or 'parser' at top level, got %s (%q)", p.cur.Kind, p.cur.Value)
 		}
 	}
 	return f, nil
+}
+
+// parseExtern records `extern <Name> { ... }` and skips the body
+// through balanced braces. The body is opaque to p4lite — vocab files
+// declare it so p4c-check can resolve names like `ParserCounter`, but
+// the loader only consumes the type name.
+func (p *parser) parseExtern() (*Extern, error) {
+	startPos := p.cur.Pos
+	if _, err := p.expect(TokExtern); err != nil {
+		return nil, err
+	}
+	// Accept either an ident or the reserved ParserCounter keyword.
+	var name string
+	switch p.cur.Kind {
+	case TokIdent, TokParserCounter:
+		name = p.cur.Value
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, p.errorf(p.cur.Pos, "expected extern type name, got %s", p.cur.Kind)
+	}
+	if _, err := p.expect(TokLBrace); err != nil {
+		return nil, err
+	}
+	depth := 1
+	for depth > 0 {
+		switch p.cur.Kind {
+		case TokEOF:
+			return nil, p.errorf(startPos, "unterminated extern body")
+		case TokLBrace:
+			depth++
+		case TokRBrace:
+			depth--
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	}
+	return &Extern{Name: name, Pos: startPos}, nil
 }
 
 func (p *parser) parseHeader() (*Header, error) {
@@ -262,19 +308,57 @@ func (p *parser) parseParser() (*Parser, error) {
 		return nil, err
 	}
 	for p.cur.Kind != TokRBrace && p.cur.Kind != TokEOF {
-		if p.cur.Kind != TokState {
-			return nil, p.errorf(p.cur.Pos, "expected 'state' in parser body, got %s (%q)", p.cur.Kind, p.cur.Value)
+		switch p.cur.Kind {
+		case TokState:
+			st, err := p.parseState()
+			if err != nil {
+				return nil, err
+			}
+			par.States = append(par.States, st)
+		case TokParserCounter:
+			ci, err := p.parseCounterInst()
+			if err != nil {
+				return nil, err
+			}
+			for _, prev := range par.Counters {
+				if prev.Name == ci.Name {
+					return nil, p.errorf(ci.Pos, "ParserCounter %q already declared at %s", ci.Name, prev.Pos)
+				}
+			}
+			par.Counters = append(par.Counters, ci)
+		default:
+			return nil, p.errorf(p.cur.Pos, "expected 'state' or 'ParserCounter' in parser body, got %s (%q)", p.cur.Kind, p.cur.Value)
 		}
-		st, err := p.parseState()
-		if err != nil {
-			return nil, err
-		}
-		par.States = append(par.States, st)
 	}
 	if _, err := p.expect(TokRBrace); err != nil {
 		return nil, err
 	}
 	return par, nil
+}
+
+// parseCounterInst handles `ParserCounter() <name>;` — a no-arg
+// constructor call followed by the in-parser handle name. p4lite
+// admits exactly the no-arg shape Tofino's TNA documents; richer
+// constructors (used by the threshold-counter mode) are out of subset.
+func (p *parser) parseCounterInst() (CounterInst, error) {
+	startPos := p.cur.Pos
+	if _, err := p.expect(TokParserCounter); err != nil {
+		return CounterInst{}, err
+	}
+	if _, err := p.expect(TokLParen); err != nil {
+		return CounterInst{}, err
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return CounterInst{}, err
+	}
+	name, err := p.expect(TokIdent)
+	if err != nil {
+		return CounterInst{}, err
+	}
+	if _, err := p.expect(TokSemi); err != nil {
+		return CounterInst{}, err
+	}
+	return CounterInst{Name: name.Value, Pos: startPos}, nil
 }
 
 func (p *parser) parseParam() (Param, error) {
@@ -367,6 +451,15 @@ var supportedMethods = map[TokenKind]func(p *parser, obj string, startPos Positi
 	TokAdvance: (*parser).parseAdvanceCall,
 }
 
+// counterMethods maps a ParserCounter method's source name (TNA
+// nomenclature: `set`, `decrement`) to its statement parser. These
+// names are plain identifiers in P4-16 (the TNA spec doesn't reserve
+// them), so dispatch happens after the keyword-based table misses.
+var counterMethods = map[string]func(p *parser, counter string, startPos Position) (Stmt, error){
+	"set":       (*parser).parseCounterSetCall,
+	"decrement": (*parser).parseCounterDecrementCall,
+}
+
 // parseStmt dispatches on the method name in `obj.method(...)` to
 // the per-method parser via supportedMethods.
 func (p *parser) parseStmt() (Stmt, error) {
@@ -384,12 +477,23 @@ func (p *parser) parseStmt() (Stmt, error) {
 		}
 		return handler(p, obj.Value, startPos)
 	}
-	names := make([]string, 0, len(supportedMethods))
+	if p.cur.Kind == TokIdent {
+		if handler, ok := counterMethods[p.cur.Value]; ok {
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			return handler(p, obj.Value, startPos)
+		}
+	}
+	names := make([]string, 0, len(supportedMethods)+len(counterMethods))
 	for k := range supportedMethods {
 		names = append(names, k.String())
 	}
+	for n := range counterMethods {
+		names = append(names, "'"+n+"'")
+	}
 	sort.Strings(names)
-	return nil, p.errorf(p.cur.Pos, "unsupported method %s on %q (recognised: %s)", p.cur.Kind, obj.Value, strings.Join(names, ", "))
+	return nil, p.errorf(p.cur.Pos, "unsupported method %s (%q) on %q (recognised: %s)", p.cur.Kind, p.cur.Value, obj.Value, strings.Join(names, ", "))
 }
 
 // parseExtractCall handles `obj.extract(target)` or
@@ -422,6 +526,64 @@ func (p *parser) parseExtractCall(obj string, startPos Position) (Stmt, error) {
 		return nil, err
 	}
 	return es, nil
+}
+
+// parseCounterSetCall handles `<counter>.set(((bit<N>)(hdr.<F> - K)) << S);`.
+// Cursor sits past the `set` token. The arg shares AdvanceField's
+// cast-and-shift template so the byte expression flowing into the
+// counter slot is the same one trailer-skip already lowers. The
+// shared core consumes both the closing `)` and the trailing `;`.
+func (p *parser) parseCounterSetCall(counter string, startPos Position) (Stmt, error) {
+	if _, err := p.expect(TokLParen); err != nil {
+		return nil, err
+	}
+	adv, err := p.parseAdvanceCastedShift(counter, startPos)
+	if err != nil {
+		return nil, err
+	}
+	if adv.Kind != AdvanceField {
+		return nil, p.errorf(startPos, "%s.set requires the `((bit<N>)(hdr.<F> - K)) << S` template (lookahead form not supported here)", counter)
+	}
+	return &CounterCallStmt{
+		Counter:   counter,
+		Op:        CounterSet,
+		BitWidth:  adv.BitWidth,
+		Target:    adv.Target,
+		FieldName: adv.FieldName,
+		BaseWords: adv.BaseWords,
+		ScaleLog2: adv.ScaleLog2,
+		Pos:       startPos,
+	}, nil
+}
+
+// parseCounterDecrementCall handles `<counter>.decrement(<INT>);`.
+// Cursor sits past the `decrement` token.
+func (p *parser) parseCounterDecrementCall(counter string, startPos Position) (Stmt, error) {
+	if _, err := p.expect(TokLParen); err != nil {
+		return nil, err
+	}
+	iTok, err := p.expect(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokRParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(TokSemi); err != nil {
+		return nil, err
+	}
+	if iTok.Int == 0 {
+		return nil, p.errorf(iTok.Pos, "%s.decrement(0) is a no-op (use a positive byte count)", counter)
+	}
+	if iTok.Int > uint64(maxInt32) {
+		return nil, p.errorf(iTok.Pos, "%s.decrement(%d) exceeds the int32 range", counter, iTok.Int)
+	}
+	return &CounterCallStmt{
+		Counter:      counter,
+		Op:           CounterDecrement,
+		LiteralBytes: int(iTok.Int),
+		Pos:          startPos,
+	}, nil
 }
 
 // parseAdvanceCall handles all three pkt.advance templates:
@@ -472,7 +634,7 @@ func (p *parser) parseAdvanceLiteral(obj string, startPos Position) (Stmt, error
 // `((bit<N>) ...) << S` shape — AdvanceField and AdvanceLookahead.
 // Cursor sits one token past the `pkt.advance(` opener (so on the
 // first inner `(`).
-func (p *parser) parseAdvanceCastedShift(obj string, startPos Position) (Stmt, error) {
+func (p *parser) parseAdvanceCastedShift(obj string, startPos Position) (*AdvanceStmt, error) {
 	mismatch := func(pos Position) error {
 		return p.errorf(pos, "pkt.advance must use one of `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)` / `pkt.advance(((bit<N>)pkt.lookahead<bit<M>>()[lo:hi]) << S)` / `pkt.advance(<INT>)`")
 	}
@@ -726,45 +888,79 @@ func (p *parser) parseSelect() (*Select, error) {
 	return sel, nil
 }
 
-// parseSelectKey accepts either a dotted field path (keyed on an
-// extracted-header field) or a `pkt.lookahead<bit<N>>()` peek that
-// dispatches on bytes the parser hasn't consumed yet.
+// parseSelectKey accepts a dotted field path, a
+// `pkt.lookahead<bit<N>>()` peek, or a `<counter>.is_zero()` test.
+// The two method forms share an `<ident>.<method>` shape that
+// collides with the dotted-path syntax until we see what's after
+// the `.`, so each speculatively descends through tryDottedMethod
+// and rewinds on miss.
 func (p *parser) parseSelectKey() (SelectKey, error) {
 	startPos := p.cur.Pos
-	// `pkt` is a TokIdent; lookahead requires recognising the method
-	// name after `.`. The parser look-ahead is one token, so we save
-	// the lexer position and try the lookahead form first.
 	if p.cur.Kind == TokIdent && p.cur.Value == "pkt" {
-		snap := p.lex.Save()
-		objTok := p.cur
-		if err := p.advance(); err != nil {
+		if _, ok, err := p.tryDottedMethod(TokLookahead, ""); err != nil {
 			return SelectKey{}, err
-		}
-		if p.cur.Kind == TokDot {
-			if err := p.advance(); err != nil {
+		} else if ok {
+			bits, err := p.parseLookaheadType()
+			if err != nil {
 				return SelectKey{}, err
 			}
-			if p.cur.Kind == TokLookahead {
-				if err := p.advance(); err != nil {
-					return SelectKey{}, err
-				}
-				bits, err := p.parseLookaheadType()
-				if err != nil {
-					return SelectKey{}, err
-				}
-				return SelectKey{Kind: SelectKeyLookahead, Bits: bits, Pos: startPos}, nil
-			}
+			return SelectKey{Kind: SelectKeyLookahead, Bits: bits, Pos: startPos}, nil
 		}
-		// Not a lookahead — rewind and fall through to dotted path,
-		// where `pkt.foo` is a (rare but legal) field path.
-		p.lex.Restore(snap)
-		p.cur = objTok
+	}
+	if obj, ok, err := p.tryDottedMethod(TokIdent, "is_zero"); err != nil {
+		return SelectKey{}, err
+	} else if ok {
+		if _, err := p.expect(TokLParen); err != nil {
+			return SelectKey{}, err
+		}
+		if _, err := p.expect(TokRParen); err != nil {
+			return SelectKey{}, err
+		}
+		return SelectKey{Kind: SelectKeyCounterIsZero, Counter: obj, Pos: startPos}, nil
 	}
 	path, err := p.parseDottedPath()
 	if err != nil {
 		return SelectKey{}, err
 	}
 	return SelectKey{Kind: SelectKeyField, Path: path, Pos: startPos}, nil
+}
+
+// tryDottedMethod speculatively consumes `<obj>.<method>` from the
+// current cursor and reports whether it matched. methodKind picks
+// the method's token kind; methodValue (when non-empty) additionally
+// requires the method ident's text to match — used to disambiguate
+// plain idents like "is_zero" without lexer-level reservation. On
+// match the cursor sits past the method token and obj returns the
+// receiver name. On miss the lexer rewinds so the cursor is exactly
+// where it started, and the caller can try the next form.
+func (p *parser) tryDottedMethod(methodKind TokenKind, methodValue string) (obj string, matched bool, err error) {
+	if p.cur.Kind != TokIdent {
+		return "", false, nil
+	}
+	snap := p.lex.Save()
+	objTok := p.cur
+	if err := p.advance(); err != nil {
+		return "", false, err
+	}
+	if p.cur.Kind != TokDot {
+		p.lex.Restore(snap)
+		p.cur = objTok
+		return "", false, nil
+	}
+	if err := p.advance(); err != nil {
+		return "", false, err
+	}
+	methodMatches := p.cur.Kind == methodKind &&
+		(methodValue == "" || p.cur.Value == methodValue)
+	if !methodMatches {
+		p.lex.Restore(snap)
+		p.cur = objTok
+		return "", false, nil
+	}
+	if err := p.advance(); err != nil {
+		return "", false, err
+	}
+	return objTok.Value, true, nil
 }
 
 // parseLookaheadType consumes the `<bit<N>>()` tail of a
@@ -851,7 +1047,7 @@ func (p *parser) parseCase(keyCount int) (Case, error) {
 		if len(c.Values) != keyCount {
 			return Case{}, p.errorf(startPos, "select case has %d values, expected %d", len(c.Values), keyCount)
 		}
-	case TokInt, TokIdent:
+	case TokInt, TokIdent, TokTrue, TokFalse:
 		m, err := p.parseMatch()
 		if err != nil {
 			return Case{}, err
@@ -861,7 +1057,7 @@ func (p *parser) parseCase(keyCount int) (Case, error) {
 			return Case{}, p.errorf(startPos, "select case has 1 value, expected %d", keyCount)
 		}
 	default:
-		return Case{}, p.errorf(p.cur.Pos, "expected 'default', value, or '(' for select case, got %s", p.cur.Kind)
+		return Case{}, p.errorf(p.cur.Pos, "expected 'default', value (int or true/false), or '(' for select case, got %s", p.cur.Kind)
 	}
 	if _, err := p.expect(TokColon); err != nil {
 		return Case{}, err
@@ -909,6 +1105,16 @@ func (p *parser) parseMatch() (Match, error) {
 			return Match{}, err
 		}
 		return m, nil
+	case TokTrue:
+		if err := p.advance(); err != nil {
+			return Match{}, err
+		}
+		return Match{IsBool: true, Bool: true, Pos: startPos}, nil
+	case TokFalse:
+		if err := p.advance(); err != nil {
+			return Match{}, err
+		}
+		return Match{IsBool: true, Bool: false, Pos: startPos}, nil
 	case TokIdent:
 		if p.cur.Value == "_" {
 			m := Match{IsWildcard: true, Pos: startPos}
@@ -917,8 +1123,8 @@ func (p *parser) parseMatch() (Match, error) {
 			}
 			return m, nil
 		}
-		return Match{}, p.errorf(p.cur.Pos, "unexpected identifier %q in match (only integers or '_' supported)", p.cur.Value)
+		return Match{}, p.errorf(p.cur.Pos, "unexpected identifier %q in match (only integers, '_' or true/false supported)", p.cur.Value)
 	default:
-		return Match{}, p.errorf(p.cur.Pos, "expected integer or '_' in select match, got %s", p.cur.Kind)
+		return Match{}, p.errorf(p.cur.Pos, "expected integer, '_' or true/false in select match, got %s", p.cur.Kind)
 	}
 }

@@ -20,7 +20,12 @@ const bit<8> GRE_IPV6_NEXT_HEADER = 47;
 
 // Flag-triggered optional sub-headers. The flag byte sits at offset 0
 // of gre_h; declaration order (C → K → S) matches the wire layout so
-// codegen advances R4 in the correct sequence.
+// codegen advances R4 in the correct sequence. The codegen drives
+// these per-flag advances rather than the parser block because P4-16
+// `transition select` matches on equality, not bit tests, so per-flag
+// conditional advances cannot be expressed inline. (Compare gtp.p4,
+// where E/S/PN gate one shared optional via `(0,0,0): accept;
+// default: parse_opt;`, a shape that equality-only select can encode.)
 const bit<8> GRE_OPT_FLAGS_BYTE_OFFSET = 0;
 const bit<8> GRE_OPT_TRIGGER_C         = 0x80;
 const bit<8> GRE_OPT_LEN_C             = 4;
@@ -28,3 +33,10 @@ const bit<8> GRE_OPT_TRIGGER_K         = 0x20;
 const bit<8> GRE_OPT_LEN_K             = 4;
 const bit<8> GRE_OPT_TRIGGER_S         = 0x10;
 const bit<8> GRE_OPT_LEN_S             = 4;
+
+parser GreParser(packet_in pkt, out gre_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}

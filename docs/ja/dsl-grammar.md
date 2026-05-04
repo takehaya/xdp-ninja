@@ -304,7 +304,7 @@ case-keyset    ::= integer | '_' | 'default'
 
 | Production | parser | 例文 |
 |---|---|---|
-| `parser-decl` | `vocab/p4lite/parser.go::parseParser` | `parser EthFragment(packet_in pkt, out eth_h hdr) {...}` |
+| `parser-decl` | `vocab/p4lite/parser.go::parseParser` | `parser EthParser(packet_in pkt, out eth_h hdr) {...}` |
 | `state` | `vocab/p4lite/parser.go::parseState` | `state start { pkt.extract(hdr); transition accept; }` |
 | `transition` | `vocab/p4lite/parser.go::parseTransition` | `transition select(eth.ethertype) { 0x0800: ipv4; default: reject; }` |
 
@@ -312,6 +312,8 @@ case-keyset    ::= integer | '_' | 'default'
 - 引数 direction は `packet_in` / `out` のみ (`in` / `inout` 未対応)
 - statement は `obj.extract(target)` または `obj.extract(target.next)` のみ
 - `select` case は整数 / `_` / `default` / tuple のみ。mask (`val &&& mask`) / range (`a..b`) / 名前参照は未対応
+
+**convention**: bundled vocab は固定 size protocol (vlan / udp / icmp 等) でも常に `parser <Proto>Parser(...) { state start { pkt.extract(hdr); transition accept; } }` の trivial block を declare する。loader は `isTrivialMachine` で同 shape を検出して `ParseStateMachine = nil` に集約する (legacy fixed-size codegen path)。block の有無で生成 BPF は変わらないが、全 vocab が同じ「header + const + parser block」3 段構成になり、`make p4c-check` も自然に通る。
 
 ### 2.5 例文ファイル
 
@@ -326,7 +328,7 @@ header eth_h {
 
 const bool ETH_MPLS_NO_CHECK = true;
 
-parser EthFragment(packet_in pkt, out eth_h hdr) {
+parser EthParser(packet_in pkt, out eth_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

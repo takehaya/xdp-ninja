@@ -48,6 +48,7 @@ P2-9  field has             ✅ F6 bitwise & で superseded (`tcp.flags & 0x12 =
 P2-10 算術ネスト 4→8        bpf_loop ctx を 16 byte 下に移動 + maxArithDepth bump
 B-1   .exists bool atom     ✅ 型システム PR-2 で対応 (where 句直接記述)
 B-3   parser-block TLV walk  PR-3-1〜4 + Phase 2 retry (demand-driven slot, lifted prelude, ~6 insn vs legacy ~200; 4 kernel matrix green)
+B-5   ParserCounter extern   p4lite に Tofino TNA 互換 ParserCounter (extern + set/decrement/is_zero) を追加。vocab loader / codegen / dsltest E2E まで通り、合成 IPv4 vocab で IHL=5/6/7/15 walk が verifier 通過 (production vocab 未採用、移行は別件)
 ```
 
 ## P2: 機能拡張 (需要次第)
@@ -74,12 +75,18 @@ B-3   parser-block TLV walk  PR-3-1〜4 + Phase 2 retry (demand-driven slot, lif
 
 **動機**: §B PR-D で TCP options の vocab 宣言と option-walk codegen は通った。同じ枠組みで IPv4 options (Router Alert, Record Route, Source Route, Timestamp, Security 等) を declare すれば追加 codegen なしで動く。
 
-**スコープ**:
-- `pkg/kunai/protocols/ipv4.p4` に `IPV4_OPT_TERMINATOR_KIND/PADDING_KIND/LENGTH_BYTE_OFF` + 各 option の `<NAME>_KIND/SIZE` + `header ipv4_opt_<name>_h`
-- 主要対象: Router Alert (kind 148, 4 B 固定)、Record Route / LSR / SSR / Internet Timestamp (可変、内部 array — Phase 2 まで `.exists` のみ)
-- dsltest E2E
+**現状 (2026-05-04)**: B-5 (ParserCounter) で extern + counter-driven walk が landed、続く 2-key tuple-select 拡張 (`(pc.is_zero(), pkt.lookahead<bit<8>>())`) の vocab + codegen も landed。合成 IPv4 vocab 経由の `TestParserCounterTupleDispatch` (dsltest) で E2E 検証済。
 
-**工数**: 1 日 (RA だけなら 2 時間)。
+ただし bundled `ipv4.p4` を Mechanism 8 化する **production migration は試行 → revert**: `eth/ipv4/udp/gtp/...` のような chain で kernel verifier の 1M insn limit を超える combinatorial blowup が発生 (commit `39f5c530` で push、kernel 6.1/6.6 で reject)。原因は `(4,5):accept` fast path が verifier の bpf_loop subprogram 探索を isolate できず、ipv4 + 下流レイヤの state 数が掛け算で爆発するため (Plan agent の R4 risk が顕在化)。
+
+**残スコープ (要 verifier 探索量削減)**:
+- (a) **demand-driven** 化: program が `ipv4.options.<X>` を query しない場合は bpf_loop を emit せず Mechanism 1 の bulk advance にフォールバック (option_demand.go の slot allocator パターンを walk 全体に拡張)
+- (b) Mechanism 8 emit 時に `(4,5):accept` を verifier に対して dead-code として証明する path-isolation
+- (c) bpf_loop subprogram の per-iter state を pin する new prelude (slot-store prelude の応用、kind byte だけでなく counter slot も verifier-friendly に)
+
+(a) が最も筋良く、`option_demand.go::collectQueriedOptions` の existing デマンド walker が前例。production 移行は (a) の codegen 拡張が landing してから再試行。
+
+**工数 (予測)**: 3-4 日 (demand-driven walk 拡張 1-2 + ipv4.p4 移行 0.5 + Router Alert + 主要 option 0.5 + 4-kernel 検証 0.5)。
 
 ### B-3. CIDR / IPv4 / MAC literal を aux field に
 

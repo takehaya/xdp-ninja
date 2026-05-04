@@ -15,7 +15,7 @@ const bool ETH_CW_NO_CHECK     = true;
 const bool ETH_VXLAN_NO_CHECK  = true;
 const bool ETH_GENEVE_NO_CHECK = true;
 
-parser EthFragment(packet_in pkt, out eth_h hdr) {
+parser EthParser(packet_in pkt, out eth_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

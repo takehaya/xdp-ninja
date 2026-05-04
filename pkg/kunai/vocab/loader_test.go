@@ -1459,3 +1459,243 @@ parser F(packet_in pkt, out foo_h h) {
 		t.Fatalf("expected duplicate-header error, got %v", err)
 	}
 }
+
+// --- ParserCounter integration ---
+
+func TestLoadParserCounterRoundTrip(t *testing.T) {
+	// Exercises every counter op: extern decl, instance, set +
+	// decrement, and a counter-driven select. Foo→Bar dispatch
+	// satisfies the cross-vocab namespace check.
+	fsys := fstest.MapFS{
+		"vocab/foo.p4":  &fstest.MapFile{Data: []byte(`
+header foo_h { bit<8> ihl; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 3);
+        transition wait;
+    }
+    state wait {
+        transition select(pc.is_zero()) {
+            true:  accept;
+            false: consume;
+        }
+    }
+    state consume {
+        pkt.advance(8);
+        pc.decrement(1);
+        transition wait;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> dst; bit<48> src; bit<16> et; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	specs, err := Load(fsys, "vocab")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	foo, ok := specs["foo"]
+	if !ok {
+		t.Fatal("foo not loaded")
+	}
+	psm := foo.ParseStateMachine
+	if psm == nil {
+		t.Fatal("expected non-trivial ParseStateMachine for ParserCounter walk")
+	}
+	if len(psm.Counters) != 1 || psm.Counters[0].Name != "pc" {
+		t.Fatalf("Counters = %+v, want one entry named pc", psm.Counters)
+	}
+	startCt := psm.States[psm.EntryIdx].Counters
+	if len(startCt) != 1 || startCt[0].Kind != CounterOpSet || startCt[0].Counter != "pc" {
+		t.Fatalf("start state Counters = %+v, want one CounterOpSet(pc)", startCt)
+	}
+	waitIdx, ok := psm.StateIdx["wait"]
+	if !ok {
+		t.Fatal("wait state missing")
+	}
+	wait := psm.States[waitIdx]
+	if wait.Trans.Kind != TransSelect ||
+		wait.Trans.Select == nil ||
+		len(wait.Trans.Select.Keys) != 1 ||
+		wait.Trans.Select.Keys[0].Kind != SelectKeyCounterIsZero ||
+		wait.Trans.Select.Keys[0].Counter != "pc" {
+		t.Errorf("wait transition = %+v, want CounterIsZero(pc) select", wait.Trans)
+	}
+	if !IsMultiStateLoopEntry(psm.States, waitIdx) {
+		t.Errorf("wait should register as a multi-state loop entry (counter dispatch shape)")
+	}
+	consumeIdx := psm.StateIdx["consume"]
+	consume := psm.States[consumeIdx]
+	if len(consume.Counters) != 1 || consume.Counters[0].Kind != CounterOpDecrement ||
+		consume.Counters[0].LiteralBytes != 1 {
+		t.Errorf("consume Counters = %+v, want one CounterOpDecrement(pc, 1)", consume.Counters)
+	}
+}
+
+func TestLoadParserCounterRejectsUndeclaredName(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h { bit<8> ihl; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+
+parser F(packet_in pkt, out foo_h h) {
+    state start {
+        pkt.extract(h);
+        ghost.decrement(1);
+        transition accept;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> a; bit<48> b; bit<16> c; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	_, err := Load(fsys, "vocab")
+	if err == nil || !strings.Contains(err.Error(), "not declared as a `ParserCounter()` instance") {
+		t.Fatalf("expected undeclared-counter error, got %v", err)
+	}
+}
+
+// TestLoadParserCounterTupleSelect pins the 2-key
+// (counter.is_zero, lookahead<bit<8>>()) tuple shape that drives the
+// canonical TNA byte-bounded TLV walk. The loader must recognise the
+// entry as a multi-state self-loop entry, and dispatchKindForSibling
+// must read the kind value from the tuple's second slot.
+func TestLoadParserCounterTupleSelect(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h    { bit<8> ihl; }
+header foo_ra_h { bit<8> kind; bit<8> length; bit<16> value; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+const bit<8>  FOO_PARSER_MAX_DEPTH = 11;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h, out foo_ra_h ra) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 5);
+        transition select(h.ihl) {
+            5:       accept;
+            default: walk;
+        }
+    }
+    state walk {
+        transition select(pc.is_zero(), pkt.lookahead<bit<8>>()) {
+            (true,  _):    accept;
+            (false, 0):    accept;
+            (false, 1):    parse_nop;
+            (false, 148):  parse_router_alert;
+            (false, _):    reject;
+        }
+    }
+    state parse_nop          { pkt.advance(8); pc.decrement(1); transition walk; }
+    state parse_router_alert { pkt.extract(ra); pc.decrement(4); transition walk; }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> a; bit<48> b; bit<16> c; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	specs, err := Load(fsys, "vocab")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	psm := specs["foo"].ParseStateMachine
+	if psm == nil {
+		t.Fatal("expected non-trivial ParseStateMachine for tuple-select walk")
+	}
+	walkIdx, ok := psm.StateIdx["walk"]
+	if !ok {
+		t.Fatal("walk state missing")
+	}
+	if !IsMultiStateLoopEntry(psm.States, walkIdx) {
+		t.Errorf("walk should register as a multi-state loop entry (2-key counter+lookahead shape)")
+	}
+	// Router Alert sibling must be reachable via kind=148. Confirms
+	// dispatchKindForSibling reads the kind from the tuple's second
+	// slot, not the counter slot.
+	layout, ok := psm.AuxLayouts["ra"]
+	if !ok || layout == nil {
+		t.Fatal("ra AuxLayout missing")
+	}
+	if !layout.IsDynamicEligible {
+		t.Errorf("ra should be IsDynamicEligible (extracted by sibling of multi-state loop)")
+	}
+	if layout.DynamicKindByte != 148 {
+		t.Errorf("ra DynamicKindByte = %d, want 148", layout.DynamicKindByte)
+	}
+}
+
+// TestLoadParserCounterRejectsReversedTuple guards the strict tuple
+// order: (counter, lookahead) is accepted, the reversed
+// (lookahead, counter) shape must reject so codegen invariants
+// (probe counter first, branch on kind second) stay narrow.
+// IsMultiStateLoopEntry returning false on the reversed shape leaves
+// validateStateGraph with an unsupported cycle, so the loader's
+// "no lowering for" error covers the symptom.
+func TestLoadParserCounterRejectsReversedTuple(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h { bit<8> ihl; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+const bit<8>  FOO_PARSER_MAX_DEPTH = 4;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 5);
+        transition walk;
+    }
+    state walk {
+        transition select(pkt.lookahead<bit<8>>(), pc.is_zero()) {
+            (_,    true):  accept;
+            (1,    false): parse_nop;
+            (_,    _):     reject;
+        }
+    }
+    state parse_nop { pkt.advance(8); pc.decrement(1); transition walk; }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> a; bit<48> b; bit<16> c; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected Load to reject reversed (lookahead, counter) tuple")
+	}
+	if !strings.Contains(err.Error(), "no lowering for") {
+		t.Errorf("expected 'no lowering for' diagnostic, got %v", err)
+	}
+}

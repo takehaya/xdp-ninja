@@ -38,7 +38,7 @@ const bit<16> GTP_UDP_DPORT = 2152;
 // headers; 8 leaves headroom without exploding the instruction budget.
 const bit<8> GTP_MAX_DEPTH = 8;
 
-parser GtpFragment(packet_in pkt,
+parser GtpParser(packet_in pkt,
                    out gtp_h gtp,
                    out gtp_opt_h opt,
                    out gtp_ext_h[8] exts) {
