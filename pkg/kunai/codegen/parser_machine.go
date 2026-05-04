@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math/bits"
 
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
@@ -326,6 +327,17 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 	for _, adv := range state.Advances {
 		switch adv.Kind {
 		case vocab.AdvanceOpField:
+			// emitVariableTrailInline anchors its byte load at the
+			// layer-entry slot via state.OffsetAtEntry, which only
+			// matches a primary-header field. The loader admits aux-
+			// targeted advance for the SACK / RR option-with-trailing
+			// -array shape, but that form must live in a multi-state
+			// loop sibling whose state.OffsetAtEntry is undefined and
+			// therefore never reaches this inline path; reject loudly
+			// rather than emit a silently mis-anchored load.
+			if c.machine.AuxLayouts[adv.Target] != nil {
+				return nil, nil, fmt.Errorf("%w: pkt.advance via aux-header field (target=%q) outside a multi-state loop sibling is not supported", ErrNotImplemented, adv.Target)
+			}
 			vt := variableTailSkipFromHeaderLength(adv.Skip)
 			tail, err := emitVariableTrailInline(state.OffsetAtEntry, vt, dslReject)
 			if err != nil {
@@ -487,29 +499,14 @@ var knownVariableTails = map[string]variableTailSkip{
 	},
 }
 
-// scaleShift converts a Scale value (must be a power of two ≤ 128)
-// to its bit-shift count. Returns -1 when scale is not a clean
-// power of two so callers can fall back / surface a clear error.
-func scaleShift(scale int) int {
-	switch scale {
-	case 1:
-		return 0
-	case 2:
-		return 1
-	case 4:
-		return 2
-	case 8:
-		return 3
-	case 16:
-		return 4
-	case 32:
-		return 5
-	case 64:
-		return 6
-	case 128:
-		return 7
+// log2PowerOfTwo returns log2(n) when n is a positive power of two,
+// else -1. Used to convert byte multipliers (Scale, ElemSize) into
+// shift counts; callers fall back / surface a clear error on -1.
+func log2PowerOfTwo(n int) int {
+	if n <= 0 || n&(n-1) != 0 {
+		return -1
 	}
-	return -1
+	return bits.TrailingZeros(uint(n))
 }
 
 // trailEnv parameterises the register conventions used by the two
@@ -559,7 +556,7 @@ type trailEnv struct {
 //     without an explicit null check. The inline path uses R0/R1
 //     which the host wrapper already proved live.
 func emitVariableTrail(fixedHs int, vt variableTailSkip, env trailEnv, failLabel string) (asm.Instructions, error) {
-	shift := scaleShift(vt.Scale)
+	shift := log2PowerOfTwo(vt.Scale)
 	if shift < 0 {
 		return nil, fmt.Errorf("%w: variable-trail scale %d is not a power of two", ErrNotImplemented, vt.Scale)
 	}

@@ -224,7 +224,7 @@ func TestDynamicAuxSentinelOutsideValidRange(t *testing.T) {
 // with the slot returned for a given layout. Slot for the first
 // queried option (kind 2 / mss) at layerPos 2 is
 // dynamicAuxOffsetSlotBase - (2 * dynamicAuxMaxSlotsPerLayer + 0) * 8
-// = -256 - 64 = -320.
+// = -256 - 80 = -336 (with dynamicAuxMaxSlotsPerLayer = 5).
 func TestDynamicAuxSlotForLayoutAllocates(t *testing.T) {
 	specs, err := dslvocab.Bundled()
 	if err != nil {
@@ -242,7 +242,8 @@ func TestDynamicAuxSlotForLayoutAllocates(t *testing.T) {
 	if !ok {
 		t.Fatal("dynamicAuxSlotForLayout returned !ok for queried mss")
 	}
-	if slot != -320 {
-		t.Errorf("slot = %d, want -320", slot)
+	want := dynamicAuxOffsetSlotBase - int16(2*dynamicAuxMaxSlotsPerLayer)*8
+	if slot != want {
+		t.Errorf("slot = %d, want %d", slot, want)
 	}
 }

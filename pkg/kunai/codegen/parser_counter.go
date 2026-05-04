@@ -141,7 +141,7 @@ func emitCounterSetValue(fixedHs int, vt *vocab.HeaderLength, env counterEnv, fa
 	if vt == nil {
 		return nil, fmt.Errorf("%w: counter set with nil HeaderLength", ErrNotImplemented)
 	}
-	shift := scaleShift(vt.Scale)
+	shift := log2PowerOfTwo(vt.Scale)
 	if shift < 0 {
 		return nil, fmt.Errorf("%w: counter set scale %d is not a power of two", ErrNotImplemented, vt.Scale)
 	}

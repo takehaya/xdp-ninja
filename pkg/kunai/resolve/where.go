@@ -260,8 +260,8 @@ func (r *resolver) resolveQualifiedField(fp *ast.FieldPath) (*ir.FieldRef, error
 	if len(fp.Parts) < 2 {
 		return nil, errorf(fp.Pos, "field path %q must be qualified (e.g. 'ipv4.src' or '<label>.<field>')", fp.String())
 	}
-	if len(fp.Parts) > 4 {
-		return nil, errorf(fp.Pos, "nested field access %q is not supported (max 4 segments)", fp.String())
+	if len(fp.Parts) > 5 {
+		return nil, errorf(fp.Pos, "nested field access %q is not supported (max 5 segments)", fp.String())
 	}
 	ref, err := r.resolveQualifiedFieldNoSlice(fp)
 	if err != nil {
@@ -292,6 +292,17 @@ func (r *resolver) resolveQualifiedFieldNoSlice(fp *ast.FieldPath) (*ir.FieldRef
 	}
 	if len(fp.Parts) >= 3 && hasIndexAt(fp, len(fp.Parts)-1) {
 		return nil, errorf(fp.Pos, "index on trailing field %q is not supported", fp.Parts[len(fp.Parts)-1])
+	}
+	// 5-part: `<qualifier>.options.<NAME>.<stack>[N].<field>` routes
+	// to an option-internal array (B-4 SACK blocks). Index at part 3
+	// (= the stack name) is required when the path appears outside
+	// any/all; iterator form (no index) is permitted only inside a
+	// quantifier.
+	if len(fp.Parts) == 5 {
+		if fp.Parts[1] != optionsSegment {
+			return nil, errorf(fp.Pos, "5-part field path requires the second segment to be %q (got %q)", optionsSegment, fp.Parts[1])
+		}
+		return r.resolveOptionStackField(layer, fp.Parts[2], fp.Parts[3], indexAt(fp, 3), fp.Parts[4], fp)
 	}
 	// 4-part: `<qualifier>.options.<NAME>.<field|exists>` routes to
 	// the protocol's declared OptionWalk.
@@ -364,6 +375,72 @@ func resolveOptionField(layer *ir.LayerInstance, optName, tail string, fp *ast.F
 			HeaderSize:    layout.HeaderSize,
 			FieldBitOff:   bitOff,
 			FieldBitWidth: bitWidth,
+		},
+	}, nil
+}
+
+// resolveOptionStackField handles `<qualifier>.options.<NAME>.<stack>[idx].<field>`
+// and the iterator form `<qualifier>.options.<NAME>.<stack>.<field>`. NAME
+// must resolve to a dynamic-eligible AuxLayout; stack must be one of the
+// protocol's HeaderStacks bound to NAME via OwnerOption. Static indices
+// are bounds-checked against Capacity at resolve time; dynamic indices
+// resolve to a primary-header byte field; the iterator form returns a
+// FieldRef with Stack.IsIterator = true (codegen surfaces a clear error
+// if such a ref escapes its enclosing any/all).
+func (r *resolver) resolveOptionStackField(layer *ir.LayerInstance, optName, stackName string, idx *ast.IndexExpr, fieldName string, fp *ast.FieldPath) (*ir.FieldRef, error) {
+	machine := layer.Spec.ParseStateMachine
+	if machine == nil || len(machine.AuxLayouts) == 0 {
+		return nil, errorf(fp.Pos, "protocol %q declares no parser-block options; %q is not addressable via .options.<NAME>", layer.Spec.Name, layer.Spec.Name)
+	}
+	owner := strings.ToLower(optName)
+	layout, ok := machine.AuxLayouts[owner]
+	if !ok || !layout.IsDynamicEligible {
+		return nil, errorf(fp.Pos, "protocol %q has no option named %q (or it is not queryable via the option-walk slot)", layer.Spec.Name, optName)
+	}
+	stack, ok := machine.StackRefs[stackName]
+	if !ok {
+		return nil, errorf(fp.Pos, "protocol %q has no auxiliary header stack %q under option %q", layer.Spec.Name, stackName, optName)
+	}
+	if stack.OwnerOption != owner {
+		return nil, errorf(fp.Pos, "stack %q is not owned by option %q (owner = %q)", stackName, optName, stack.OwnerOption)
+	}
+	bitOff := 0
+	bitWidth := 0
+	for _, f := range stack.HeaderRef.Fields {
+		if f.Name == fieldName {
+			bitWidth = f.Bits
+			break
+		}
+		bitOff += f.Bits
+	}
+	if bitWidth == 0 {
+		return nil, errorf(fp.Pos, "stack element header %q has no field %q", stack.HeaderName, fieldName)
+	}
+	var stackIdx *ir.StackIndex
+	if idx == nil {
+		// Iterator form — only valid inside any/all. The quantifier
+		// resolver runs after this and surfaces a clear error if the
+		// iterator escapes.
+		stackIdx = &ir.StackIndex{Capacity: stack.Capacity, IsIterator: true}
+	} else {
+		var err error
+		stackIdx, err = r.resolveStackIndex(idx, stack.Capacity, fp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ir.FieldRef{
+		Layer: layer,
+		Field: &vocab.Field{Name: fieldName, Bits: bitWidth},
+		Aux: &ir.AuxRef{
+			OutParam:         stackName,
+			HeaderName:       stack.HeaderName,
+			HeaderSize:       stack.ElemSize,
+			FieldBitOff:      bitOff,
+			FieldBitWidth:    bitWidth,
+			Stack:            stackIdx,
+			OwnerOption:      layout,
+			OffsetAfterOwner: stack.OffsetAfterOwner,
 		},
 	}, nil
 }

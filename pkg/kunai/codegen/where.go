@@ -8,6 +8,7 @@ import (
 
 	"github.com/takehaya/xdp-ninja/pkg/kunai/ast"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/ir"
+	"github.com/takehaya/xdp-ninja/pkg/kunai/vocab"
 )
 
 // whereCtx carries the shared state that codegen for a where
@@ -305,7 +306,7 @@ func (c *whereCtx) genQuantUnroll(w *ir.Condition, acceptLabel, failLabel string
 		// body for iter ≥ count. The check is `count <= i → skip`,
 		// equivalent to the "out-of-bounds" branch.
 		if countSrc != nil {
-			guard, err := c.emitCountGuard(countSrc, i, iterSkip, anySemantics, failLabel)
+			guard, err := c.emitCountGuard(countSrc, i, iterSkip)
 			if err != nil {
 				return nil, err
 			}
@@ -352,10 +353,26 @@ func (c *whereCtx) genQuantIterBody(inner *ir.Condition, target *ir.QuantTarget,
 }
 
 // emitCountGuard emits the per-iteration check that the iteration
-// index is below the runtime count. countSrc.Field is a primary
-// header field of the stack's owning layer (e.g. srv6.last_entry +
-// 1 for SRv6 segments — the +1 is folded into the offset).
-func (c *whereCtx) emitCountGuard(countSrc *quantCountSource, idx int, skipLabel string, anySemantics bool, failLabel string) (asm.Instructions, error) {
+// index is below the runtime count. Primary-header byte (Owner == nil)
+// reads from a layer-anchored field; owner-slot (Owner != nil) reads
+// from the option's per-packet base via the dynamic-aux slot, with
+// sentinel = option absent translating to "skip every iter" (vacuous
+// any/all).
+func (c *whereCtx) emitCountGuard(countSrc *quantCountSource, idx int, skipLabel string) (asm.Instructions, error) {
+	if countSrc.Owner != nil {
+		slot, ok := c.queried.dynamicAuxSlotForLayout(countSrc.Layer, countSrc.Owner)
+		if !ok {
+			return nil, fmt.Errorf("codegen: quantifier owner option %q not in demand set", countSrc.Owner.OutParam)
+		}
+		insns := emitDynamicAuxByteLoad(slot, countSrc.ByteOff, asm.Byte, skipLabel)
+		insns = append(insns,
+			asm.JLT.Imm(asm.R3, int32(countSrc.SubBefore), skipLabel),
+			asm.Sub.Imm(asm.R3, int32(countSrc.SubBefore)),
+			asm.RSh.Imm(asm.R3, int32(countSrc.RShAfter)),
+			asm.JLE.Imm(asm.R3, int32(idx), skipLabel),
+		)
+		return insns, nil
+	}
 	anchor, err := c.layerAnchorFor(countSrc.Layer)
 	if err != nil {
 		return nil, err
@@ -366,32 +383,37 @@ func (c *whereCtx) emitCountGuard(countSrc *quantCountSource, idx int, skipLabel
 		// `if R3 <= idx: skip` → `if R3 < idx+1: skip` → JLE.Imm(R3, idx, skip).
 		asm.JLE.Imm(asm.R3, int32(idx), skipLabel),
 	)
-	_ = anySemantics
-	_ = failLabel
 	return insns, nil
 }
 
-// quantCountSource carries the runtime count of an aux header stack:
-// a primary-header byte field plus an offset (e.g. last_entry + 1 for
-// SRv6). nil means "no known count" — codegen falls back to static
-// unroll over the full Capacity.
+// quantCountSource carries the runtime count of an aux header stack.
+// Two shapes folded into one struct so emitCountGuard can dispatch on
+// Owner == nil:
+//   - Primary-header byte: Layer + ByteOff + Offset (e.g. SRv6
+//     last_entry at byte 4, count = last_entry + 1).
+//   - Owner option slot: Owner (the AuxLayout the slot maps to) +
+//     ByteOff (= byte position of the length field within the
+//     option, e.g. 1 for SACK) + SubBefore (bytes to subtract = the
+//     option's fixed prefix size including kind+length) + RShAfter
+//     (log2 of element size, e.g. 3 for 8-byte SACK blocks).
 type quantCountSource struct {
-	Layer   *ir.LayerInstance
-	ByteOff int
-	Offset  int // value to add to the loaded byte (= +1 for last_entry → count)
+	Layer     *ir.LayerInstance
+	Owner     *vocab.AuxLayout
+	ByteOff   int
+	Offset    int // primary-header path: value to add to the loaded byte
+	SubBefore int // owner-slot path: bytes subtracted before the right shift
+	RShAfter  int // owner-slot path: log2(elem_size) — divides residue into element count
 }
 
 // stackCountSource derives a runtime count for the quantifier
-// target's stack. For SRv6 (the only count-driven stack in the
-// bundled vocab today) the count is `srv6.last_entry + 1`; the
-// byte offset of last_entry inside srv6_h is fixed. Other stacks
+// target's stack. SRv6 segments use the primary-header path
+// (last_entry + 1); option-internal arrays (B-4 SACK blocks) use
+// the owner-slot path with the option's length byte. Other stacks
 // return nil so the unroll runs over the full Capacity (which is
 // safe for self-flag chains where the parser has already walked
 // every entry).
 func stackCountSource(w *ir.Condition) (*quantCountSource, error) {
 	target := w.QuantTarget
-	// We need a layer to anchor the count source; pick it from the
-	// first iterator FieldRef inside the inner condition.
 	var iterRef *ir.FieldRef
 	ir.WalkConditionFieldRefs(w.Inner, func(ref *ir.FieldRef) {
 		if iterRef == nil && ref != nil && ref.Aux != nil && ref.Aux.Stack != nil && ref.Aux.Stack.IsIterator {
@@ -401,11 +423,27 @@ func stackCountSource(w *ir.Condition) (*quantCountSource, error) {
 	if iterRef == nil {
 		return nil, fmt.Errorf("codegen: quantifier inner has no iterator field reference")
 	}
+	if iterRef.Aux.OwnerOption != nil {
+		// length byte sits at slot+1 inside the option; residue
+		// past kind+length (= OffsetAfterOwner bytes) divides by
+		// ElemSize to give the live element count. SACK: byte 1,
+		// subtract 2, >> 3 → up to 4 blocks.
+		shift := log2PowerOfTwo(target.ElemSize)
+		if shift < 0 {
+			return nil, fmt.Errorf("codegen: quantifier element size %d is not a power of two (cannot derive count via shift)", target.ElemSize)
+		}
+		return &quantCountSource{
+			Layer:     iterRef.Layer,
+			Owner:     iterRef.Aux.OwnerOption,
+			ByteOff:   iterRef.Aux.OffsetAfterOwner - 1,
+			SubBefore: iterRef.Aux.OffsetAfterOwner,
+			RShAfter:  shift,
+		}, nil
+	}
 	if iterRef.Layer.Spec.Name == "srv6" && target.OutParam == "segments" {
 		// last_entry is byte 4 of srv6_h. count = last_entry + 1.
 		return &quantCountSource{Layer: iterRef.Layer, ByteOff: 4, Offset: 1}, nil
 	}
-	// No known count source: caller falls back to full Capacity unroll.
 	return nil, nil
 }
 
@@ -1476,27 +1514,61 @@ func (c *whereCtx) dynamicOffsetSlotFor(f *ir.FieldRef) (int16, bool) {
 // first byte; sentinel (-1) means the option was not extracted on
 // this packet — the predicate evaluates false (jumps to dslReject).
 //
-// ~6 insns versus the ~200 emitted by the legacy option walk.
+// Two addressing modes folded into the same byteOff:
+//   - Single aux: byteOff = FieldBitOff/8.
+//   - Owner-bound stack: byteOff = OffsetAfterOwner +
+//     Static*ElemSize + FieldBitOff/8. The slot still holds the
+//     OWNER option's base; the element offset is folded here at
+//     codegen time. Iterator indices are rebound to a static index
+//     by the surrounding any/all unroll before reaching this site.
 func (c *whereCtx) genDynamicOffsetAuxLoad(f *ir.FieldRef, slot int16) (asm.Instructions, error) {
 	if f.Aux.FieldBitOff%8 != 0 || f.Aux.FieldBitWidth%8 != 0 {
 		return nil, fmt.Errorf("%w: dynamic-offset aux field %s.%s not byte-aligned (bit-off %d, %d bits)", ErrNotImplemented, f.Layer.Spec.Name, f.Aux.OutParam, f.Aux.FieldBitOff, f.Aux.FieldBitWidth)
 	}
-	fieldByteOff := f.Aux.FieldBitOff / 8
+	byteOff := f.Aux.FieldBitOff / 8
+	if f.Aux.OwnerOption != nil {
+		stack := f.Aux.Stack
+		if stack == nil {
+			return nil, fmt.Errorf("%w: owner-bound aux %q has no stack index — predicate codegen needs Static/Dynamic/Iterator", ErrNotImplemented, f.Aux.OutParam)
+		}
+		if !stack.IsStatic {
+			return nil, fmt.Errorf("%w: owner-bound aux %q with non-static index is not yet supported", ErrNotImplemented, f.Aux.OutParam)
+		}
+		byteOff += f.Aux.OffsetAfterOwner + int(stack.Static)*f.Aux.HeaderSize
+	}
 	fieldBytes := f.Aux.FieldBitWidth / 8
 	size, err := asmSizeFor(fieldBytes)
 	if err != nil {
 		return nil, err
 	}
-	insns := asm.Instructions{
-		asm.LoadMem(asm.R3, asm.R10, slot, asm.DWord),
-		asm.JEq.Imm(asm.R3, dynamicAuxSentinel, dslReject),
-	}
-	insns = append(insns, foldOffsetIntoScalar(asm.R5, asm.R3, int32(fieldByteOff), dslReject)...)
-	insns = append(insns, boundedScalarLoad(asm.R3, asm.R0, asm.R5, asm.R1, size, dslReject)...)
+	insns := emitDynamicAuxByteLoad(slot, byteOff, size, dslReject)
 	if fieldBytes > 1 {
 		insns = append(insns, asm.HostTo(asm.BE, asm.R3, size))
 	}
 	return insns, nil
+}
+
+// emitDynamicAuxByteLoad emits the canonical "load a byte at
+// `slot[OwnerOption] + byteOff`" sequence used by every dynamic-aux
+// where-time access:
+//
+//   - LoadMem R3 ← slot value (= aux's per-packet base in scratch)
+//   - JEq sentinel: option absent on this packet, jump to failLabel
+//   - foldOffsetIntoScalar R5 = R3 + byteOff (scalar narrowed for
+//     verifier precision)
+//   - boundedScalarLoad R3 = *(scratch[R5]) at the requested size
+//
+// On return R3 holds the loaded value (host endianness — caller is
+// responsible for HostTo if a multi-byte field needs byte-swap). R0/
+// R1/R5 are clobbered.
+func emitDynamicAuxByteLoad(slot int16, byteOff int, size asm.Size, failLabel string) asm.Instructions {
+	insns := asm.Instructions{
+		asm.LoadMem(asm.R3, asm.R10, slot, asm.DWord),
+		asm.JEq.Imm(asm.R3, dynamicAuxSentinel, failLabel),
+	}
+	insns = append(insns, foldOffsetIntoScalar(asm.R5, asm.R3, int32(byteOff), failLabel)...)
+	insns = append(insns, boundedScalarLoad(asm.R3, asm.R0, asm.R5, asm.R1, size, failLabel)...)
+	return insns
 }
 
 // whereDynamicMultiByte emits the address compute (R5 = element

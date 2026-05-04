@@ -77,6 +77,27 @@ header tcp_opt_ts_h {
     bit<32> tsecr;
 }
 
+// SACK option fixed header (kind=5, RFC 2018 §3): only the kind +
+// length pair. The {left, right} blocks live in the trailing
+// variable region as a separate `tcp_sack_block_h[4]` stack — see
+// the parser block + the loader's owner-bound stack resolver. This
+// split lets DSL refer to the option's per-packet base via
+// `tcp.options.SACK.kind` / `.length` while array predicates
+// (`tcp.options.SACK.blocks[N].left`, quantifiers) reach the
+// blocks through the owner-relative offset path.
+header tcp_opt_sack_h {
+    bit<8> kind;
+    bit<8> length;
+}
+
+// One SACK block: a 32-bit left edge + 32-bit right edge of an
+// out-of-order TCP byte range. Up to 4 blocks fit in a 40-byte
+// option trailer (40 - 2 / 8 = 4.75 → 4).
+header tcp_sack_block_h {
+    bit<32> left;
+    bit<32> right;
+}
+
 // TCP options trailer is at most 40 bytes (data_offset = 15 → 60 byte
 // header → 40 byte trailer). The smallest option is 1 byte (NOP / EOL),
 // so the option-walk loop runs at most 32 iterations (= bpf_loop cap).
@@ -85,11 +106,13 @@ header tcp_opt_ts_h {
 const bit<8> TCP_PARSER_MAX_DEPTH = 32;
 
 parser TcpParser(packet_in pkt,
-                   out tcp_h               hdr,
-                   out tcp_opt_mss_h       mss,
-                   out tcp_opt_ws_h        ws,
-                   out tcp_opt_sack_perm_h sack_perm,
-                   out tcp_opt_ts_h        ts) {
+                   out tcp_h                hdr,
+                   out tcp_opt_mss_h        mss,
+                   out tcp_opt_ws_h         ws,
+                   out tcp_opt_sack_perm_h  sack_perm,
+                   out tcp_opt_sack_h       sack,
+                   out tcp_sack_block_h[4]  blocks,
+                   out tcp_opt_ts_h         ts) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.data_offset) {
@@ -104,6 +127,7 @@ parser TcpParser(packet_in pkt,
             2:       parse_mss;
             3:       parse_ws;
             4:       parse_sack_perm;
+            5:       parse_sack;
             8:       parse_ts;
             default: parse_unknown_opt;
         }
@@ -113,6 +137,20 @@ parser TcpParser(packet_in pkt,
     state parse_ws           { pkt.extract(ws);        transition parse_options; }
     state parse_sack_perm    { pkt.extract(sack_perm); transition parse_options; }
     state parse_ts           { pkt.extract(ts);        transition parse_options; }
+    state parse_sack {
+        // Drain the entire option by reading the length byte via
+        // pre-advance lookahead and bumping R3 by `length` bytes,
+        // landing at the next option's kind. The slot prelude has
+        // already recorded R3-at-entry as the SACK base before
+        // dispatch, so DSL queries reach kind / length / blocks at
+        // slot+0 / +1 / +2 without an explicit extract. The
+        // dispatched-but-not-extracted shape avoids the JLT+Sub
+        // combo an aux-targeted `(sack.length - 2)` advance would
+        // emit — that extra branch trips the verifier on kernels
+        // 6.1 / 6.6 with het-size alts in the chain.
+        pkt.advance(((bit<32>)pkt.lookahead<bit<16>>()[7:0]) << 3);
+        transition parse_options;
+    }
     state parse_unknown_opt {
         // Length byte sits at byte +1 of the unknown option (the kind
         // byte at byte 0 already failed dispatch). lookahead<bit<16>>()
