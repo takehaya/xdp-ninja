@@ -1537,6 +1537,7 @@ func (c *pmCtx) emitMultiStateCaseBody(target, entryIdx int, breakLabel, continu
 // state self-loop runs exactly one sibling.
 func (c *pmCtx) emitSiblingCallbackBody(sib *vocab.ParseState, breakLabel string) (asm.Instructions, error) {
 	var insns asm.Instructions
+	totalHs := 0
 	for _, ex := range sib.Extracts {
 		if ex.HeaderSize%8 != 0 {
 			return nil, fmt.Errorf("%w: multi-state callback extract on %q is %d bits (not byte-aligned)", ErrNotImplemented, ex.HeaderName, ex.HeaderSize)
@@ -1550,9 +1551,22 @@ func (c *pmCtx) emitSiblingCallbackBody(sib *vocab.ParseState, breakLabel string
 			asm.Add.Imm(asm.R3, int32(hs)),
 			asm.StoreMem(asm.R2, bpfLoopCbCtxOffsetField, asm.R3, asm.DWord),
 		)
+		totalHs += hs
 	}
 	for _, adv := range sib.Advances {
 		switch adv.Kind {
+		case vocab.AdvanceOpField:
+			// Aux-targeted: the byte sits at offset R3 - totalHs +
+			// LenByteOff. emitVariableTrail folds totalHs via fixedHs
+			// so the load lands at R3 + (-totalHs + LenByteOff). Used
+			// by IPv4 RR's `pkt.advance((rr.length - 3) << 3)` after
+			// `pkt.extract(rr)` to drain the trailing addrs[] tail.
+			vt := variableTailSkipFromHeaderLength(adv.Skip)
+			tail, err := emitVariableTrailCallback(totalHs, vt, breakLabel)
+			if err != nil {
+				return nil, err
+			}
+			insns = append(insns, tail...)
 		case vocab.AdvanceOpLookahead:
 			vt := variableTailSkipFromHeaderLength(adv.Skip)
 			tail, err := emitVariableTrailCallback(0, vt, breakLabel)

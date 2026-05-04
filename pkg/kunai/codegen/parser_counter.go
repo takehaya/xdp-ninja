@@ -123,6 +123,36 @@ func (c *pmCtx) emitCounterOp(op vocab.CounterOp, fixedHs int, env counterEnv, f
 		body = append(body, asm.StoreMem(env.stackBase, resolvedSlot, env.scratchA, asm.DWord))
 		return body, nil
 	case vocab.CounterOpDecrement:
+		switch {
+		case op.DecrementLookaheadByteOffR:
+			// Lookahead form: byte sits at R3 + DecrementLookaheadByteOff
+			// (no extract precedes, so no fixedHs adjustment).
+			loadByteOff := int32(op.DecrementLookaheadByteOff)
+			var insns asm.Instructions
+			insns = append(insns, foldOffsetIntoScalar(env.scratchB, env.offset, loadByteOff, failLabel)...)
+			insns = append(insns, boundedScalarLoad(env.scratchA, env.scratchStart, env.scratchB, env.scratchEnd, asm.Byte, failLabel)...)
+			insns = append(insns,
+				asm.LoadMem(env.scratchB, env.stackBase, resolvedSlot, asm.DWord),
+				asm.Sub.Reg(env.scratchB, env.scratchA),
+				asm.StoreMem(env.stackBase, resolvedSlot, env.scratchB, asm.DWord),
+			)
+			return insns, nil
+		case op.DecrementFieldName != "":
+			// Field-expr form: load the aux byte at R3 + (-fixedHs +
+			// DecrementByteOff) into scratchA, then Sub.Reg into the
+			// counter slot loaded into scratchB. scratchB is clobbered
+			// by the address fold then reused for the slot.
+			loadByteOff := int32(-fixedHs + op.DecrementByteOff)
+			var insns asm.Instructions
+			insns = append(insns, foldOffsetIntoScalar(env.scratchB, env.offset, loadByteOff, failLabel)...)
+			insns = append(insns, boundedScalarLoad(env.scratchA, env.scratchStart, env.scratchB, env.scratchEnd, asm.Byte, failLabel)...)
+			insns = append(insns,
+				asm.LoadMem(env.scratchB, env.stackBase, resolvedSlot, asm.DWord),
+				asm.Sub.Reg(env.scratchB, env.scratchA),
+				asm.StoreMem(env.stackBase, resolvedSlot, env.scratchB, asm.DWord),
+			)
+			return insns, nil
+		}
 		return asm.Instructions{
 			asm.LoadMem(env.scratchA, env.stackBase, resolvedSlot, asm.DWord),
 			asm.Sub.Imm(env.scratchA, int32(op.LiteralBytes)),

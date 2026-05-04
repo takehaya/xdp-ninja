@@ -51,6 +51,8 @@ B-3   parser-block TLV walk  PR-3-1〜4 + Phase 2 retry (demand-driven slot, lif
 B-5   ParserCounter extern   p4lite に Tofino TNA 互換 ParserCounter (extern + set/decrement/is_zero) を追加。vocab loader / codegen / dsltest E2E まで通り、合成 IPv4 vocab で IHL=5/6/7/15 walk が verifier 通過
 B-2   IPv4 options vocab     ParserCounter ベースの 2-key tuple-select walk + demand-driven bulk-advance fallback (02ea93e) で production migration (625ba5e)。Router Alert (kind=148) を declare、4 kernel matrix green
 B-4   Option 内部 array      TCP SACK の {left, right} ブロック配列を 4-PR で land (c97a0ba/a4375c1/0cba890/51f9992)。owner-bound HeaderStack + dispatched-but-not-extracted aux で R1 verifier 爆発を回避、static unroll 量化で bpf_loop 増やさず。RR 追加は PR-A.5 として別 entry
+B-3   aux literal predicate  IPv4/IPv6/MAC/CIDR の 6 gate sites を解除 (6547a42)。新 auxLoadEmitter で aux 4 mode (single/static-stack/dynamic-stack/owner-bound) を unify、`srv6.segments[0].addr == fc00::/16`、`ipv4.options.RR.addrs[0].addr == 10.0.0.1` 等が動く
+B-4a  IPv4 Record Route      pc.decrement に field-expr / lookahead-form 拡張 (69cc697)、ipv4.p4 RR declare (b17d1c5)。R1 contingency 発火 → dispatched-but-not-extracted shape に pivot。SACK と同型の addrs[N] / any/all
 ```
 
 ## P2: 機能拡張 (需要次第)
@@ -104,20 +106,27 @@ B-4   Option 内部 array      TCP SACK の {left, right} ブロック配列を 
 
 **工数 (予測)**: 1-2 日 (emit 形態探索 + 4-kernel verifier 検証)。優先度低 (CPU 浪費のみ、機能不足ではない)。
 
-### B-3. CIDR / IPv4 / MAC literal を aux field に
+### B-3. CIDR / IPv4 / MAC literal を aux field に ✅ landed
 
-**動機**: §B PR-A〜D で integer 比較の aux access は通ったが、IPv4 / IPv6 / MAC / CIDR literal を aux 経由で比較するパスは現状 `ErrNotImplemented`。発火する書き方は 2 種:
+**動機**: §B PR-A〜D で integer 比較の aux access は通ったが、IPv4 / IPv6 / MAC / CIDR literal を aux 経由で比較するパスは `ErrNotImplemented` で bail していた。
 
-- bracket form: `gtp[opt.flow_label == fe80::1]` — codegen `predicate.go::emitIPv6Predicate` 等の `pred.Field.Aux != nil` ガード
-- where form (single + quantified): `where srv6.segments[0].addr == fc00::/16`、`where any(srv6.segments.addr == fc00::/16)` — codegen `where.go::genLiteralCompare` の CIDR 分岐内 `aux != nil` ガード (現エラー: `CIDR literal predicate on auxiliary header field is not yet supported`)
+**完了 (2026-05-04, commit 6547a42)**: 1 PR で 6 gate sites (predicate.go の 5 emit 関数 + where.go::genLiteralCompare の CIDR branch) を解除。新ヘルパー `auxLoadEmitter` (codegen.go) が aux mode 4 種 (single / static-stack / dynamic-stack / owner-bound static) の addressing を unify、prelude + loadAt closure を返す。
 
-**スコープ**:
-- `pkg/kunai/codegen/predicate.go::emitIPv4Predicate` / `emitIPv6Predicate` / `emitMACPredicate` / `emitIPv4CIDRPredicate` / `emitIPv6CIDRPredicate` の `pred.Field.Aux != nil` ガードを通す
-- `pkg/kunai/codegen/where.go::genLiteralCompare` の CIDR / multi-byte literal 分岐で aux 対応 — 既存 `emitFieldLoad` (anchor 経由) で abs / slot 両モード対応にする
-- aux byte offset を `fieldRefByteOffset` で取り、`genLiteralCompareDynamic` 同様に gating + 多 byte 読み出しを emit
-- bracket form と where form のヘルパ共通化を視野
+新 DSL 表現:
 
-**工数**: 1-2 日 (5 + 1 関数の並列対応)。
+```
+where srv6.segments[0].addr == fc00::/16              # IPv6 CIDR + 静的 stack
+where any(srv6.segments.addr == 2001:db8::/32)        # IPv6 CIDR + iter (rebind)
+where ipv4.options.RR.addrs[0].addr == 10.0.0.1       # owner-bound + IPv4 literal
+where any(ipv4.options.RR.addrs.addr == 192.168.1.1)  # owner-bound + iter
+```
+
+**設計の肝**:
+- 多 byte 比較は `R5 = element-start` を 1 度計算 + `LoadMem(R3, R5, FieldByteOff+chunkOff, size)` を chunk 毎に発行。dynamic stack は既存 `emitDynamicStackAddress` 流用、owner-bound は slot 値 + sentinel + scalar narrowing 経由 (`boundedScalarLoad` で R3.umax を ScratchBufSize-relative に pin、verifier-safe)。
+- IPv6 multi-chunk で `cmpRegEqU32` が R5 を clobber するのを避けるため、aux path は `R2` を mask/host scratch に。
+- where path の `genLiteralCompare` 入口で owner-bound 検出 → `genOwnerBoundLiteralCompare` (5 literal kind 全対応)。CIDR aux gate は単純削除、既存 `whereLiteralFieldOffset` の fold が static / single aux を吸収。dynamic stack CIDR は新 `genDynamicCIDRv4 / v6`。
+
+**残スコープ**: なし (本 entry は完了)。
 
 ### B-4. Option 内部 array (SACK.blocks / RR.addrs) ✅ TCP SACK landed
 
@@ -140,30 +149,36 @@ B-4   Option 内部 array      TCP SACK の {left, right} ブロック配列を 
 **残スコープ**:
 - **PR-5 (動的 index, 低優先 / staged)**: `tcp.options.SACK.blocks[<dyn-byte>].left` 形。TCP に dynamic byte source (IPv4 IHL のような primary-byte で blocks 数を数えるパターン) なくテスト難。SACK の場合「length byte」が動的だが、これは count の参照であって index ではない。需要が出た時に再検討。
 
-### B-4a. IPv4 Record Route follow-up (要 ParserCounter 拡張)
+### B-4a. IPv4 Record Route follow-up ✅ landed
 
-**動機**: B-4 が TCP SACK で internal array 機構を入れたので、同じ枠組みで IPv4 RR (kind=7, 1..9 アドレスのリスト) を declare すれば addrs[N] / any/all アクセスを得られる、という follow-up。
+**動機**: B-4 が TCP SACK で internal array 機構を入れたので、同じ枠組みで IPv4 RR (kind=7, 1..9 アドレスのリスト) を declare すれば addrs[N] / any/all アクセスを得られる。
 
-**着手時に判明したブロッカー (2026-05-04)**: ipv4.p4 は ParserCounter ベースの 2-key tuple-select walk で、各 option ステートの末尾に `pc.decrement(<bytes>)` を要求する。Router Alert は固定 4-byte なので `pc.decrement(4)` リテラルで済むが、RR は length が可変 (3 + 4*N bytes) で `pc.decrement(rr.length)` のような field 参照が必要。
+**完了 (2026-05-04)**: 2 PR で landed。
 
-p4lite の現状 `pc.decrement` は **整数リテラル専用** (`p4lite/parser.go::parseCounterDecrementCall`、`CounterOp.LiteralBytes`)。可変サイズ option を載せるには:
+| # | scope | commit |
+|---|---|---|
+| PR-2 | `pc.decrement(<aux>.<field>)` field-expr (parser + types + loader + codegen) | 69cc697 |
+| PR-3 | ipv4.p4 RR declare + R1 contingency 発火で `pc.decrement` lookahead-form 追加 | b17d1c5 |
 
-- (a) `pc.decrement` を field 式 (`pc.decrement(rr.length)`) を受理するよう拡張。`CounterOp` を sum type 化、codegen で field ロード経由の sub.reg 発行
-- (b) RR を ParserCounter から外して TCP と同じ multi-state self-loop に切り替え。ipv4.p4 全体の walk をリファクタリング (counter なし、`(pc.is_zero(), kind)` の 2-key を `(kind)` 1-key に戻す)
+**経緯**:
+1. 計画段階: `extract(rr); pc.decrement(rr.length); pkt.advance((rr.length-3) << 3); transition walk;` の Router Alert 同型 shape を見込み。可変長対応のため `pc.decrement` を field-expr (`<aux>.<field>`) 受理に拡張 (PR-2)。
+2. 実装すると **R1 risk 発火**: trailing `pkt.advance((rr.length - 3) << 3)` が AdvanceOpField + Base=3 → MinimumTotal=3 → JLT+Sub combo を bpf_loop callback で emit、`where ipv4.options.RR.kind == 7` で 1M insn 越え。B-2a / SACK v1 と同種パターン。
+3. **Contingency pivot**: `pc.decrement` を lookahead-form (`(bit<8>)pkt.lookahead<bit<16>>()[7:0]`) も受理するよう拡張、parse_rr を **dispatched-but-not-extracted** 化。両 op が同じ lookahead window から length byte を読み、R3 を消費せず option 全体を advance。
 
-(a) が筋良く、ParserCounter 拡張として独立して使える機能になる。(b) は ipv4 の verifier 通過パターンを破壊リスク高。
+**設計の肝**:
+- `pc.decrement` 3-template (literal / field-expr / lookahead) → `CounterCallStmt` + `CounterOp` に sum type fields。
+- `auxLoadEmitter` の owner-bound prelude 修正: R5 は SCALAR (slot+elemOff)、loadAt は per-chunk で `boundedScalarLoad` 経由 (R3.umax ≤ ScratchBufSize 確保で verifier-safe)。
+- `stackCountSource` の ByteOff: `OffsetAfterOwner-1` (SACK 偶然マッチ) → 固定 `1` (RFC 標準 length byte 位置 / TCP 9293 + IPv4 791 共通)。RR (OffsetAfterOwner=3) で破綻していた count 計算を修正、SACK regression なし。
 
-**スコープ (a 案)**:
-- p4lite parser: `pc.decrement(<expr>)` で field/literal を両受理、AST sum type に
-- vocab loader: field 式を `lowerCastShiftSkip` 同種で lower、`CounterOp.Skip` に格納
-- codegen: counter set と同型の byte-load → sub.reg into counter slot 経路を追加
-- ipv4.p4: `ipv4_opt_rr_h` (kind+length+pointer, 3 byte) + `ipv4_rr_addr_h` (32-bit) + `out ipv4_rr_addr_h[9] addrs` + `parse_record_route` state with `pc.decrement(rr.length)`
-- dsltest E2E: `ipv4.options.RR.addrs[0]`, any/all
-- 4-kernel matrix 検証
+**新 DSL 表現** (B-3 と組合せ):
 
-**工数 (再見積もり)**: 1.5-2 d (うち 1 d は ParserCounter 拡張)。
+```
+where ipv4.options.RR.kind == 7
+where ipv4.options.RR.addrs[0].addr == 10.0.0.1
+where any(ipv4.options.RR.addrs.addr == 192.168.1.1)
+```
 
-**工数**: B-4 SACK 完了 3.5 d (見積通り)。RR は B-4a として別 entry。
+**工数**: 計画時 1.5-2 d (再見積もり) → 実績 R1 contingency 込みで 1 d (PR-2) + 1 d (PR-3)。
 
 ## P3: コード負債 / Sanity 系
 

@@ -424,10 +424,14 @@ func stackCountSource(w *ir.Condition) (*quantCountSource, error) {
 		return nil, fmt.Errorf("codegen: quantifier inner has no iterator field reference")
 	}
 	if iterRef.Aux.OwnerOption != nil {
-		// length byte sits at slot+1 inside the option; residue
-		// past kind+length (= OffsetAfterOwner bytes) divides by
-		// ElemSize to give the live element count. SACK: byte 1,
-		// subtract 2, >> 3 → up to 4 blocks.
+		// Length byte sits at slot+1 by RFC convention (kind=byte 0,
+		// length=byte 1 for both TCP options and IPv4 options). The
+		// raw length byte then has SubBefore=OffsetAfterOwner (the
+		// option's fixed prefix) subtracted to get the trailing-array
+		// byte count, which divides by ElemSize to yield the element
+		// count. Examples:
+		//   SACK   (OffsetAfterOwner=2, ElemSize=8): (length-2) >> 3 = 0..4 blocks
+		//   RR     (OffsetAfterOwner=3, ElemSize=4): (length-3) >> 2 = 0..9 addrs
 		shift := log2PowerOfTwo(target.ElemSize)
 		if shift < 0 {
 			return nil, fmt.Errorf("codegen: quantifier element size %d is not a power of two (cannot derive count via shift)", target.ElemSize)
@@ -435,7 +439,7 @@ func stackCountSource(w *ir.Condition) (*quantCountSource, error) {
 		return &quantCountSource{
 			Layer:     iterRef.Layer,
 			Owner:     iterRef.Aux.OwnerOption,
-			ByteOff:   iterRef.Aux.OffsetAfterOwner - 1,
+			ByteOff:   1,
 			SubBefore: iterRef.Aux.OffsetAfterOwner,
 			RShAfter:  shift,
 		}, nil

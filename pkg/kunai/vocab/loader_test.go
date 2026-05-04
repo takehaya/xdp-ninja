@@ -1760,6 +1760,125 @@ parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition 
 	}
 }
 
+// TestLoadParserCounterDecrementFieldExpr pins the field-expr form of
+// `<counter>.decrement(<aux>.<field>)`: the loader resolves the aux
+// header out-param + field name to a byte offset within the aux
+// header, populating CounterOp.DecrementByteOff. LiteralBytes stays
+// zero. Synthetic shape mirrors the IPv4 RR layout (kind+length+
+// pointer header + variable trailer) without depending on the
+// production ipv4.p4.
+func TestLoadParserCounterDecrementFieldExpr(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h    { bit<8> ihl; }
+header foo_rr_h { bit<8> kind; bit<8> length; bit<8> pointer; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+const bit<8>  FOO_PARSER_MAX_DEPTH = 11;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h, out foo_rr_h rr) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 5);
+        transition select(h.ihl) {
+            5:       accept;
+            default: walk;
+        }
+    }
+    state walk {
+        transition select(pc.is_zero(), pkt.lookahead<bit<8>>()) {
+            (true,  _): accept;
+            (false, 7): parse_record_route;
+            (false, _): reject;
+        }
+    }
+    state parse_record_route {
+        pkt.extract(rr);
+        pc.decrement(rr.length);
+        transition walk;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> a; bit<48> b; bit<16> c; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	specs, err := Load(fsys, "vocab")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	psm := specs["foo"].ParseStateMachine
+	stIdx := psm.StateIdx["parse_record_route"]
+	st := psm.States[stIdx]
+	if len(st.Counters) != 1 {
+		t.Fatalf("parse_record_route Counters = %d, want 1", len(st.Counters))
+	}
+	op := st.Counters[0]
+	if op.Kind != CounterOpDecrement {
+		t.Errorf("op.Kind = %v, want CounterOpDecrement", op.Kind)
+	}
+	if op.LiteralBytes != 0 {
+		t.Errorf("LiteralBytes = %d, want 0 (field-expr form)", op.LiteralBytes)
+	}
+	if op.DecrementTarget != "rr" || op.DecrementFieldName != "length" {
+		t.Errorf("decrement = (%q, %q), want (rr, length)", op.DecrementTarget, op.DecrementFieldName)
+	}
+	if op.DecrementByteOff != 1 {
+		t.Errorf("DecrementByteOff = %d, want 1 (length is byte 1 of foo_rr_h)", op.DecrementByteOff)
+	}
+}
+
+// TestLoadParserCounterDecrementFieldExprRejectsPrimary guards the
+// "aux only" rule for counter.decrement field-expr — primary-target
+// decrements would need a different anchoring path (the counter is
+// set from primary; decrement reads primary too is a redundant
+// no-op). Reject loudly.
+func TestLoadParserCounterDecrementFieldExprRejectsPrimary(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h { bit<8> ihl; }
+const bit<16> FOO_BAR_ETHERTYPE = 0x0800;
+const bit<8>  FOO_PARSER_MAX_DEPTH = 11;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 5);
+        pc.decrement(h.ihl);
+        transition accept;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> a; bit<48> b; bit<16> c; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected error for primary-target counter.decrement field-expr")
+	}
+	if !strings.Contains(err.Error(), "primary header") {
+		t.Errorf("err = %v; want 'primary header' hint", err)
+	}
+}
+
 // TestLoadParserCounterRejectsReversedTuple guards the strict tuple
 // order: (counter, lookahead) is accepted, the reversed
 // (lookahead, counter) shape must reject so codegen invariants

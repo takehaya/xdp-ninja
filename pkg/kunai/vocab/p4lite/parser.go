@@ -556,33 +556,169 @@ func (p *parser) parseCounterSetCall(counter string, startPos Position) (Stmt, e
 	}, nil
 }
 
-// parseCounterDecrementCall handles `<counter>.decrement(<INT>);`.
-// Cursor sits past the `decrement` token.
+// parseCounterDecrementCall handles three pc.decrement templates:
+//   - literal: pc.decrement(<INT>)
+//   - field-expr: pc.decrement(<aux>.<field>)
+//   - lookahead: pc.decrement(((bit<N>)pkt.lookahead<bit<M>>()[lo:hi]))
+//
+// The lookahead form is the dispatched-but-not-extracted shape used
+// by variable-size IPv4 options whose length byte sits in the
+// pre-dispatch lookahead window — RR's
+// pc.decrement(((bit<8>)pkt.lookahead<bit<16>>()[7:0])) drains the
+// counter by the option's total size while pkt.advance with the same
+// lookahead operand consumes the bytes. Cursor sits past the
+// `decrement` token.
 func (p *parser) parseCounterDecrementCall(counter string, startPos Position) (Stmt, error) {
 	if _, err := p.expect(TokLParen); err != nil {
 		return nil, err
 	}
-	iTok, err := p.expect(TokInt)
+	switch p.cur.Kind {
+	case TokLParen:
+		return p.parseCounterDecrementLookahead(counter, startPos)
+	case TokInt:
+		iTok, err := p.expect(TokInt)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokRParen); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokSemi); err != nil {
+			return nil, err
+		}
+		if iTok.Int == 0 {
+			return nil, p.errorf(iTok.Pos, "%s.decrement(0) is a no-op (use a positive byte count)", counter)
+		}
+		if iTok.Int > uint64(maxInt32) {
+			return nil, p.errorf(iTok.Pos, "%s.decrement(%d) exceeds the int32 range", counter, iTok.Int)
+		}
+		return &CounterCallStmt{
+			Counter:      counter,
+			Op:           CounterDecrement,
+			LiteralBytes: int(iTok.Int),
+			Pos:          startPos,
+		}, nil
+	case TokIdent:
+		targetTok, err := p.expect(TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokDot); err != nil {
+			return nil, err
+		}
+		fieldTok, err := p.expect(TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokRParen); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokSemi); err != nil {
+			return nil, err
+		}
+		return &CounterCallStmt{
+			Counter:            counter,
+			Op:                 CounterDecrement,
+			DecrementTarget:    targetTok.Value,
+			DecrementFieldName: fieldTok.Value,
+			Pos:                startPos,
+		}, nil
+	}
+	return nil, p.errorf(p.cur.Pos, "%s.decrement(...) expects an integer literal, `<aux>.<field>`, or `((bit<N>)pkt.lookahead<bit<M>>()[hi:lo])`", counter)
+}
+
+// parseCounterDecrementLookahead parses
+// `((bit<N>)pkt.lookahead<bit<M>>()[hi:lo]));` after the opening `(`
+// of `<counter>.decrement(`. Cursor sits on the inner opening `(`
+// (the cast prefix). Mirrors parseAdvanceLookaheadOperand but does
+// not require a trailing `<< S` shift — counter values are bytes,
+// not bit counts. The slice [hi:lo] selects exactly one byte inside
+// the lookahead window.
+func (p *parser) parseCounterDecrementLookahead(counter string, startPos Position) (Stmt, error) {
+	mismatch := func(pos Position) error {
+		return p.errorf(pos, "%s.decrement(((bit<N>)pkt.lookahead<bit<M>>()[hi:lo])) is the only nested form supported; got an unexpected token", counter)
+	}
+	expectShape := func(k TokenKind) (Token, error) {
+		if p.cur.Kind != k {
+			return Token{}, mismatch(p.cur.Pos)
+		}
+		t := p.cur
+		if err := p.advance(); err != nil {
+			return Token{}, err
+		}
+		return t, nil
+	}
+	// Cast prefix `((bit<N>)`. The outer `(` of `decrement((bit<N>)...)`
+	// was consumed by the caller; we open the second `(` here.
+	for _, k := range []TokenKind{TokLParen, TokBit, TokLAngle} {
+		if _, err := expectShape(k); err != nil {
+			return nil, err
+		}
+	}
+	nTok, err := expectShape(TokInt)
 	if err != nil {
 		return nil, err
 	}
+	for _, k := range []TokenKind{TokRAngle, TokRParen} {
+		if _, err := expectShape(k); err != nil {
+			return nil, err
+		}
+	}
+	pktTok, err := expectShape(TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if pktTok.Value != "pkt" {
+		return nil, p.errorf(pktTok.Pos, "expected `pkt.lookahead<...>()` inside the cast, got `%s.<...>`", pktTok.Value)
+	}
+	if _, err := expectShape(TokDot); err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokLookahead); err != nil {
+		return nil, err
+	}
+	mBits, err := p.parseLookaheadType()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokLBracket); err != nil {
+		return nil, err
+	}
+	hiTok, err := expectShape(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokColon); err != nil {
+		return nil, err
+	}
+	loTok, err := expectShape(TokInt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := expectShape(TokRBracket); err != nil {
+		return nil, err
+	}
+	// Closing `)` of `decrement(...)`.
 	if _, err := p.expect(TokRParen); err != nil {
 		return nil, err
 	}
 	if _, err := p.expect(TokSemi); err != nil {
 		return nil, err
 	}
-	if iTok.Int == 0 {
-		return nil, p.errorf(iTok.Pos, "%s.decrement(0) is a no-op (use a positive byte count)", counter)
+	if loTok.Int > hiTok.Int {
+		return nil, p.errorf(loTok.Pos, "slice lo=%d must be ≤ hi=%d (use [hi:lo] convention)", loTok.Int, hiTok.Int)
 	}
-	if iTok.Int > uint64(maxInt32) {
-		return nil, p.errorf(iTok.Pos, "%s.decrement(%d) exceeds the int32 range", counter, iTok.Int)
+	if hiTok.Int >= uint64(mBits) {
+		return nil, p.errorf(hiTok.Pos, "slice hi=%d must be smaller than the lookahead width M=%d", hiTok.Int, mBits)
 	}
 	return &CounterCallStmt{
-		Counter:      counter,
-		Op:           CounterDecrement,
-		LiteralBytes: int(iTok.Int),
-		Pos:          startPos,
+		Counter:                counter,
+		Op:                     CounterDecrement,
+		Pos:                    startPos,
+		DecrementBitWidth:      int(nTok.Int),
+		DecrementLookaheadBits: mBits,
+		DecrementSliceLo:       int(loTok.Int),
+		DecrementSliceHi:       int(hiTok.Int),
 	}, nil
 }
 

@@ -758,6 +758,47 @@ func TestParseCounterDecrementRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseCounterDecrementFieldExpr(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr, out o_t opt) {
+		ParserCounter() pc;
+		state s {
+			pc.decrement(opt.length);
+			transition accept;
+		}
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cs := f.Parsers[0].States[0].Stmts[0].(*CounterCallStmt)
+	if cs.Op != CounterDecrement {
+		t.Fatalf("Op = %v, want CounterDecrement", cs.Op)
+	}
+	if cs.DecrementTarget != "opt" || cs.DecrementFieldName != "length" {
+		t.Errorf("decrement field-expr = (%q, %q), want (opt, length)", cs.DecrementTarget, cs.DecrementFieldName)
+	}
+	if cs.LiteralBytes != 0 {
+		t.Errorf("LiteralBytes = %d, want 0 for field-expr form", cs.LiteralBytes)
+	}
+}
+
+func TestParseCounterDecrementRejectsBareNumber(t *testing.T) {
+	// Negative form: `pc.decrement(opt)` — bare ident with no `.field`
+	// — must reject so the parser doesn't silently accept a partial
+	// path expression.
+	src := `parser P(packet_in pkt, out h_t hdr, out o_t opt) {
+		ParserCounter() pc;
+		state s {
+			pc.decrement(opt);
+			transition accept;
+		}
+	}`
+	_, err := Parse([]byte(src), "t.p4")
+	if err == nil {
+		t.Fatal("expected error for bare-ident decrement operand")
+	}
+}
+
 func TestParseCounterDecrementRejectsZero(t *testing.T) {
 	src := `parser P(packet_in pkt, out h_t hdr) {
 		ParserCounter() pc;

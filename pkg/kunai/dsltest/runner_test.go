@@ -516,6 +516,76 @@ func TestIPv4OptionsAdvance(t *testing.T) {
 	r.MustMatch(t, Build(t, o), "ipv4 with options + tcp")
 }
 
+// TestIPv4OptionsRRKind pins the dispatched-but-extracted aux path
+// for the RR option (kind=7). The slot prelude records R3-at-entry
+// as the rr base before parse_record_route fires, so DSL queries
+// reach kind / length / pointer at slot+0/+1/+2.
+func TestIPv4OptionsRRKind(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where ipv4.options.RR.kind == 7")
+	o := Defaults()
+	o.IPv4Options = []layers.IPv4Option{{
+		OptionType:   7,
+		OptionLength: 11,
+		OptionData:   make([]byte, 9), // 1 IPv4 addr + pointer + 4 unused
+	}}
+	r.MustMatch(t, Build(t, o), "RR option present, kind byte at slot reads 7")
+
+	noRR := Defaults()
+	noRR.IPv4Options = []layers.IPv4Option{{
+		OptionType:   148, // Router Alert
+		OptionLength: 4,
+		OptionData:   []byte{0x00, 0x00},
+	}}
+	r.MustReject(t, Build(t, noRR), "no RR option — slot stays at sentinel")
+}
+
+// TestIPv4OptionsRRAddrStaticIndex exercises owner-bound stack +
+// IPv4 literal compare on `ipv4.options.RR.addrs[0].addr ==
+// 10.0.0.1`. Address compute is slot[rr] + OffsetAfterOwner +
+// 0*ElemSize + FieldByteOff = slot+3+0+0 = slot+3.
+func TestIPv4OptionsRRAddrStaticIndex(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where ipv4.options.RR.addrs[0].addr == 10.0.0.1")
+	o := Defaults()
+	o.IPv4Options = []layers.IPv4Option{{
+		OptionType:   7,
+		OptionLength: 11,
+		// pointer (1 byte) + addrs[0] (4 bytes) + addrs[1] (4 bytes; unused).
+		OptionData: append([]byte{4}, append([]byte{10, 0, 0, 1}, 0, 0, 0, 0)...),
+	}}
+	r.MustMatch(t, Build(t, o), "addrs[0].addr == 10.0.0.1 matches")
+
+	mismatch := Defaults()
+	mismatch.IPv4Options = []layers.IPv4Option{{
+		OptionType:   7,
+		OptionLength: 11,
+		OptionData:   append([]byte{4}, append([]byte{10, 0, 0, 2}, 0, 0, 0, 0)...),
+	}}
+	r.MustReject(t, Build(t, mismatch), "addrs[0].addr != 10.0.0.1")
+}
+
+// TestIPv4OptionsRRAddrAnyQuantifier exercises any() over the RR
+// addrs stack. Capacity is 9 (max addresses in a 39-byte option);
+// runtime count comes from (rr.length - 3) / 4.
+func TestIPv4OptionsRRAddrAnyQuantifier(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where any(ipv4.options.RR.addrs.addr == 192.168.1.1)")
+	// Two-address RR: pointer + addr0 + addr1, length = 3 + 8 = 11.
+	o := Defaults()
+	o.IPv4Options = []layers.IPv4Option{{
+		OptionType:   7,
+		OptionLength: 11,
+		OptionData:   append([]byte{4}, append([]byte{10, 0, 0, 1}, 192, 168, 1, 1)...),
+	}}
+	r.MustMatch(t, Build(t, o), "any: addrs[1] = 192.168.1.1 matches")
+
+	noMatch := Defaults()
+	noMatch.IPv4Options = []layers.IPv4Option{{
+		OptionType:   7,
+		OptionLength: 11,
+		OptionData:   append([]byte{4}, append([]byte{10, 0, 0, 1}, 10, 0, 0, 2)...),
+	}}
+	r.MustReject(t, Build(t, noMatch), "no addr matches 192.168.1.1")
+}
+
 // TestIPv4OptionsRejectsTooShort confirms the IHL underflow guard:
 // a hand-crafted frame with IHL=4 (< 5) must be rejected by the
 // HDRLEN MinimumTotal check.

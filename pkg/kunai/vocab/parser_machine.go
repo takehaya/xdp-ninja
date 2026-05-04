@@ -754,6 +754,33 @@ func buildCounter(cs *p4lite.CounterCallStmt, ctx *buildCtx) (CounterOp, error) 
 			Pos:       cs.Pos,
 		}, nil
 	case p4lite.CounterDecrement:
+		if cs.DecrementLookaheadBits > 0 {
+			byteOff, err := lowerLookaheadByteSlice(cs.DecrementLookaheadBits, cs.DecrementSliceLo, cs.DecrementSliceHi, "counter.decrement", ctx, cs.Pos)
+			if err != nil {
+				return CounterOp{}, err
+			}
+			return CounterOp{
+				Kind:                       CounterOpDecrement,
+				Counter:                    cs.Counter,
+				DecrementLookaheadByteOff:  byteOff,
+				DecrementLookaheadByteOffR: true,
+				Pos:                        cs.Pos,
+			}, nil
+		}
+		if cs.DecrementFieldName != "" {
+			byteOff, err := lookupAuxFieldByteOffset(cs.DecrementTarget, cs.DecrementFieldName, ctx, cs.Pos)
+			if err != nil {
+				return CounterOp{}, err
+			}
+			return CounterOp{
+				Kind:               CounterOpDecrement,
+				Counter:            cs.Counter,
+				DecrementTarget:    cs.DecrementTarget,
+				DecrementFieldName: cs.DecrementFieldName,
+				DecrementByteOff:   byteOff,
+				Pos:                cs.Pos,
+			}, nil
+		}
 		return CounterOp{
 			Kind:         CounterOpDecrement,
 			Counter:      cs.Counter,
@@ -834,6 +861,54 @@ func buildAdvance(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
 		return buildAdvanceLiteral(as, ctx)
 	}
 	return AdvanceOp{}, fmt.Errorf("%s:%s: unknown pkt.advance template kind %d", ctx.source, as.Pos, as.Kind)
+}
+
+// lowerLookaheadByteSlice resolves a `((bit<N>)pkt.lookahead<bit<M>>()
+// [hi:lo])` template's slice into the byte position the codegen byte
+// LDX should target relative to current R3. The slice [hi:lo] must
+// align with one byte of the M-bit peek; M is in bits and the peek
+// is in network MSB-first order, so the byte position from R3 is
+// `(M/8 - 1) - (lo/8)`. Same shape as buildAdvanceLookahead but
+// shared so counter.decrement can lift the same template without
+// pulling in AdvanceOp's HeaderLength wrapper.
+func lowerLookaheadByteSlice(lookaheadBits, sliceLo, sliceHi int, opName string, ctx *buildCtx, pos p4lite.Position) (int, error) {
+	if lookaheadBits%8 != 0 {
+		return 0, fmt.Errorf("%s:%s: %s lookahead<bit<%d>>() must peek a whole-byte width", ctx.source, pos, opName, lookaheadBits)
+	}
+	if (sliceHi - sliceLo + 1) != 8 {
+		return 0, fmt.Errorf("%s:%s: %s lookahead slice [%d:%d] must select exactly 8 bits", ctx.source, pos, opName, sliceHi, sliceLo)
+	}
+	if sliceLo%8 != 0 {
+		return 0, fmt.Errorf("%s:%s: %s lookahead slice [%d:%d] must start at a byte boundary (lo %% 8 == 0)", ctx.source, pos, opName, sliceHi, sliceLo)
+	}
+	return (lookaheadBits / 8) - 1 - (sliceLo / 8), nil
+}
+
+// lookupAuxFieldByteOffset resolves `<aux>.<field>` (used by
+// `<counter>.decrement(<aux>.<field>)`) into the byte offset of the
+// field within the aux header. Single-byte fields only — codegen
+// emits an unsigned byte LDX + Sub.Reg into the counter slot, with no
+// scalar-narrowing or byte-swap. The target must be a non-primary
+// `out` aux param; primary-header decrements would need a different
+// addressing path (the primary's bytes aren't on R3 at the sibling
+// state). Multi-byte support is out of scope until host byte-swap
+// handling lands.
+func lookupAuxFieldByteOffset(target, fieldName string, ctx *buildCtx, pos p4lite.Position) (int, error) {
+	h, ok := ctx.headerRefs[target]
+	if !ok {
+		return 0, fmt.Errorf("%s:%s: counter.decrement target %q is not an `out` header parameter", ctx.source, pos, target)
+	}
+	if h == ctx.primary {
+		return 0, fmt.Errorf("%s:%s: counter.decrement field-expr target %q is the primary header (use a literal for primary-driven decrements)", ctx.source, pos, target)
+	}
+	bitOff, fieldBits, ok := findFieldBitWindow(h, fieldName)
+	if !ok {
+		return 0, fmt.Errorf("%s:%s: counter.decrement references unknown field %q in header %q", ctx.source, pos, fieldName, h.Name)
+	}
+	if bitOff%8 != 0 || fieldBits != 8 {
+		return 0, fmt.Errorf("%s:%s: counter.decrement field %q must be a single byte at a byte boundary (got bit-off %d, %d bits)", ctx.source, pos, fieldName, bitOff, fieldBits)
+	}
+	return bitOff / 8, nil
 }
 
 // lowerCastShiftSkip lowers the `((bit<N>)(hdr.<F> - K)) << S`
