@@ -17,13 +17,31 @@ header ipv4_h {
 // Router Alert (RFC 2113, kind 148, length 4): 16-bit value telling
 // routers along the path whether to examine the packet (well-known
 // values: 0 = MLD, 1 = RSVP, 2 = AGGR). The fixed 4-byte shape makes
-// this the simplest IPv4 option to extract — variable-array options
-// like Record Route / Source Route / Timestamp need a separate
-// follow-up (B-4) before they have first-class accessors.
+// this the simplest IPv4 option to extract.
 header ipv4_opt_router_alert_h {
     bit<8>  kind;
     bit<8>  length;
     bit<16> value;
+}
+
+// Record Route (RFC 791 §3.1, kind 7): variable-size option whose
+// length byte covers the full kind+length+pointer header (3 bytes)
+// plus 1..9 IPv4 addresses (4 bytes each). pointer (octet 3) is the
+// 1-indexed byte offset of the next-empty slot inside the option;
+// codegen exposes it as ipv4.options.RR.pointer for inspection.
+header ipv4_opt_rr_h {
+    bit<8> kind;
+    bit<8> length;
+    bit<8> pointer;
+}
+
+// One IPv4 address slot inside a Record Route option. Addresses are
+// reached at predicate time via the owner-bound stack
+// `ipv4.options.RR.addrs[N].addr`; the parser block does not extract
+// individual entries (the slot prelude records the option base before
+// dispatch and per-element offsets fold in at where-time).
+header ipv4_rr_addr_h {
+    bit<32> addr;
 }
 
 // Ethernet/VLAN/QinQ select ipv4 via the ethertype.
@@ -89,7 +107,9 @@ extern ParserCounter {
 // options (Record Route, LSR/SSR, Timestamp).
 parser IPv4Parser(packet_in pkt,
                   out ipv4_h                  hdr,
-                  out ipv4_opt_router_alert_h router_alert) {
+                  out ipv4_opt_router_alert_h router_alert,
+                  out ipv4_opt_rr_h           rr,
+                  out ipv4_rr_addr_h[9]       addrs) {
     ParserCounter() pc;
     state start {
         pkt.extract(hdr);
@@ -104,6 +124,7 @@ parser IPv4Parser(packet_in pkt,
             (true,  _):    accept;
             (false, 0):    accept;
             (false, 1):    parse_nop;
+            (false, 7):    parse_rr;
             (false, 148):  parse_router_alert;
             (false, _):    reject;
         }
@@ -116,6 +137,23 @@ parser IPv4Parser(packet_in pkt,
     state parse_router_alert {
         pkt.extract(router_alert);
         pc.decrement(4);
+        transition walk;
+    }
+    state parse_rr {
+        // Dispatched-but-not-extracted shape: read the length byte
+        // via lookahead (without consuming bytes), decrement the
+        // counter by the option's full size, and advance R4 past
+        // the entire option in one go. Avoids the JLT+Sub combo a
+        // field-driven `pkt.advance((rr.length - 3) << 3)` would
+        // emit after a preceding extract — that combo blew the
+        // bpf_loop callback past the 1M insn limit when an aux
+        // query forced the slot prelude into the loop body. Slot
+        // prelude has already recorded R3-at-entry as the rr base
+        // before dispatch landed here, so DSL queries reach
+        // kind / length / pointer / addrs[N].addr at slot+0 / +1 /
+        // +2 / +3 + N*4 without an explicit extract.
+        pc.decrement((bit<8>)pkt.lookahead<bit<16>>()[7:0]);
+        pkt.advance(((bit<32>)pkt.lookahead<bit<16>>()[7:0]) << 3);
         transition walk;
     }
 }

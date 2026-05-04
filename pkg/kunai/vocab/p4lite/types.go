@@ -261,8 +261,20 @@ type CounterCallStmt struct {
 	BaseWords int    // the K subtracted from the field value
 	ScaleLog2 int    // the S in `<< S` (unit: bits, like AdvanceField)
 
-	// CounterDecrement only.
-	LiteralBytes int
+	// CounterDecrement only. Exactly one of three forms is set:
+	//   - LiteralBytes (literal: pc.decrement(<INT>))
+	//   - DecrementTarget + DecrementFieldName (field-expr:
+	//     pc.decrement(<aux>.<field>))
+	//   - DecrementBitWidth + DecrementLookaheadBits + DecrementSliceLo
+	//     + DecrementSliceHi (lookahead: pc.decrement(((bit<N>)
+	//     pkt.lookahead<bit<M>>()[hi:lo])))
+	LiteralBytes           int
+	DecrementTarget        string
+	DecrementFieldName     string
+	DecrementBitWidth      int
+	DecrementLookaheadBits int
+	DecrementSliceLo       int
+	DecrementSliceHi       int
 }
 
 func (*CounterCallStmt) stmtNode() {}

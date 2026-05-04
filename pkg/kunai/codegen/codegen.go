@@ -1354,17 +1354,30 @@ func auxLoadEmitter(ref *ir.FieldRef, anchor layerAnchor, resolveSlot resolveAux
 			return nil, nil, fmt.Errorf("codegen: owner option %q not in demand set for layer %q", aux.OwnerOption.OutParam, ref.Layer.Spec.Name)
 		}
 		elemOff := aux.OffsetAfterOwner + int(aux.Stack.Static)*aux.HeaderSize
+		// Prelude: R5 = slot + elemOff (a SCALAR, not a pointer). It
+		// survives boundedScalarLoad's clobber set so per-chunk loads
+		// reuse it. The pointer is rebuilt per chunk inside
+		// boundedScalarLoad which also pins the scalar.umax to fit
+		// inside the ScratchBufSize-relative memory range — the
+		// previous "R5 = R0 + slot" pointer-add path skipped that
+		// bound check and tripped the verifier on full-range slot
+		// values.
 		prelude := asm.Instructions{
 			asm.LoadMem(asm.R3, asm.R10, slot, asm.DWord),
 			asm.JEq.Imm(asm.R3, dynamicAuxSentinel, failLabel),
-			asm.Mov.Reg(asm.R5, asm.R0),
-			asm.Add.Reg(asm.R5, asm.R3),
+			asm.Mov.Reg(asm.R5, asm.R3),
 			asm.Add.Imm(asm.R5, int32(elemOff)),
 		}
 		return prelude, func(chunkOff int, size asm.Size) asm.Instructions {
-			return asm.Instructions{
-				asm.LoadMem(asm.R3, asm.R5, int16(fieldByteOff+chunkOff), size),
+			delta := int32(fieldByteOff + chunkOff)
+			insns := asm.Instructions{
+				asm.Mov.Reg(asm.R2, asm.R5),
 			}
+			if delta != 0 {
+				insns = append(insns, asm.Add.Imm(asm.R2, delta))
+			}
+			insns = append(insns, boundedScalarLoad(asm.R3, asm.R0, asm.R2, asm.R1, size, failLabel)...)
+			return insns
 		}, nil
 	}
 

@@ -528,8 +528,25 @@ type CounterOp struct {
 	Target       string        // CounterOpSet only
 	FieldName    string        // CounterOpSet only
 	Skip         *HeaderLength // CounterOpSet only
-	LiteralBytes int           // CounterOpDecrement only
-	Pos          p4lite.Position
+	LiteralBytes int           // CounterOpDecrement only — literal form
+	// DecrementTarget / DecrementFieldName / DecrementByteOff are set
+	// for the field-expr decrement form (`pc.decrement(<aux>.<field>)`)
+	// and are mutually exclusive with LiteralBytes. Codegen emits a
+	// single-byte LDX from R3 + (DecrementByteOff - aux_size) and
+	// subtracts the loaded value from the counter slot via Sub.Reg.
+	DecrementTarget    string
+	DecrementFieldName string
+	DecrementByteOff   int
+	// DecrementLookaheadByteOffR is true for the lookahead-form
+	// decrement (`pc.decrement(((bit<N>)pkt.lookahead<bit<M>>()[hi:lo]))`):
+	// the byte sits at R3 + DecrementLookaheadByteOff (no extract has
+	// preceded). Mutually exclusive with the field-expr / literal
+	// branches. Used by IPv4 RR's dispatched-but-not-extracted shape
+	// to avoid the JLT+Sub combo a field-driven trailing advance
+	// would emit.
+	DecrementLookaheadByteOff  int
+	DecrementLookaheadByteOffR bool
+	Pos                        p4lite.Position
 }
 
 // TransKind enumerates the four shapes of a parser-state
