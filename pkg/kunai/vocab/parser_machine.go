@@ -10,8 +10,8 @@ import (
 // MVP caps for parser-state-machine compilation. These bound the
 // codegen-time work and the verifier-side instruction count.
 const (
-	parserMachineMaxStates = 8 // reachable states (= states declared)
-	parserMachineMaxKeys   = 3 // tuple-match keys per `transition select`
+	parserMachineMaxStates = 16 // reachable states (= states declared)
+	parserMachineMaxKeys   = 3  // tuple-match keys per `transition select`
 )
 
 // buildCtx is the shared context the build helpers thread through —
@@ -108,6 +108,10 @@ func buildParseStateMachine(file *p4lite.File, primary *p4lite.Header, source st
 		return nil, err
 	}
 
+	if err := resolveOwnedStacks(states, stackRefs, auxLayouts, source); err != nil {
+		return nil, err
+	}
+
 	return &ParseStateMachine{
 		States:     states,
 		StateIdx:   stateIdx,
@@ -164,10 +168,32 @@ func computeAuxLayouts(states []*ParseState, entryIdx int, headerRefs map[string
 			return nil, err
 		}
 		if extractStateIdx < 0 {
-			// Aux declared but never extracted in any state. Predicate
-			// codegen would have nothing to read; record as always-fail
-			// gating so user-written predicates produce a clear error
-			// rather than a silent miss.
+			// Aux declared but never extracted. Two cases:
+			//
+			//   (a) `parse_<outName>` is a sibling state whose body is
+			//       advance-only (no extract). The dispatch case that
+			//       targets it pins the kind byte just like a standard
+			//       TLV walk sibling, and the slot prelude records R3
+			//       at sack_start before dispatching. Predicate codegen
+			//       reads kind / length / blocks at slot+0 / slot+1 /
+			//       slot+2. This is the SACK shape: skipping the
+			//       extract avoids the JLT+Sub combo that blows up the
+			//       verifier on het-size-alt chains.
+			//   (b) No corresponding parse_<outName> state exists.
+			//       Record as always-fail gating so user-written
+			//       predicates produce a clear error rather than a
+			//       silent miss.
+			if kind, ok := dispatchedAuxKind(states, outName); ok {
+				out[outName] = &AuxLayout{
+					OutParam:          outName,
+					HeaderName:        hdr.Name,
+					HeaderRef:         hdr,
+					HeaderSize:        headerSizeBits / 8,
+					IsDynamicEligible: true,
+					DynamicKindByte:   kind,
+				}
+				continue
+			}
 			out[outName] = &AuxLayout{
 				OutParam:   outName,
 				HeaderName: hdr.Name,
@@ -216,6 +242,137 @@ func computeAuxLayouts(states []*ParseState, entryIdx int, headerRefs map[string
 		}
 	}
 	return out, nil
+}
+
+// resolveOwnedStacks binds each `out H[N] x` parser-stack parameter
+// that is declared but never extracted (no `extract(x.next)` anywhere)
+// to the option aux that "owns" it — a kind+length option header
+// followed by a fixed-element trailing array (SACK blocks, IPv4
+// Record Route addrs, ...).
+//
+// A stack is owned by aux A iff some sibling state has exactly one
+// non-stack non-primary aux extract AND one trailing AdvanceOpField
+// keyed off that same aux. OwnerOption records A's out-param name;
+// OffsetAfterOwner is the owner state's pre-trailer extract size
+// (= byte distance from owner base to first stack element). At most
+// one such sibling state may exist per parser block — multiple
+// matches yield a loader error rather than a silent first-wins
+// binding. Zero candidates leaves the stack top-level (srv6.segments
+// / IPv6 ext shape where the trail begins right after the primary).
+func resolveOwnedStacks(states []*ParseState, stackRefs map[string]*HeaderStack, auxLayouts map[string]*AuxLayout, source string) error {
+	for stackName, stack := range stackRefs {
+		if stackHasPush(states, stackName) {
+			continue // stack data comes from per-iteration extracts
+		}
+		// Find candidate owner siblings. Two shapes:
+		//   A. extract(aux) + advance(aux.<len-field>) — explicit
+		//      pre-trailer extract; advance keyed off the just-
+		//      extracted aux header.
+		//   B. advance-only via lookahead, state name = parse_<aux> —
+		//      slot prelude records the option base, advance drains
+		//      the option without an extract. Used by verifier-
+		//      sensitive option-walks where the JLT+Sub combo from
+		//      shape A would inflate bpf_loop callback state IDs.
+		var owner string
+		var ownerStateName string
+		for _, s := range states {
+			if len(s.Advances) != 1 {
+				continue
+			}
+			candidate := ownerCandidate(s, auxLayouts)
+			if candidate == "" {
+				continue
+			}
+			if owner != "" {
+				return fmt.Errorf("%s:%s: stack %q is owner-bound ambiguous — sibling states %q and %q both match the option-with-trailing-array shape; explicit binding syntax is not yet supported", source, stack.HeaderRef.Pos, stackName, ownerStateName, s.Name)
+			}
+			owner = candidate
+			ownerStateName = s.Name
+		}
+		if owner == "" {
+			continue // top-level stack (srv6.segments etc.)
+		}
+		stack.OwnerOption = owner
+		stack.OffsetAfterOwner = auxLayouts[owner].HeaderSize
+	}
+	return nil
+}
+
+// parseAuxStatePrefix is the naming convention linking a parser state
+// to the `out` aux it dispatches for. parse_sack ↔ aux "sack" — used
+// by the dispatched-but-not-extracted aux detection so the loader can
+// associate a kind-byte dispatch case with an aux out-param without
+// requiring an explicit extract statement.
+const parseAuxStatePrefix = "parse_"
+
+// findStateByName returns the state with the given Name and its index,
+// or (nil, -1) when none matches.
+func findStateByName(states []*ParseState, name string) (*ParseState, int) {
+	for i, s := range states {
+		if s.Name == name {
+			return s, i
+		}
+	}
+	return nil, -1
+}
+
+// isAdvanceOnlySibling reports whether the state has zero extracts and
+// exactly one AdvanceOpLookahead — the shape parse_<aux> uses to drain
+// an option without consuming its kind+length pair.
+func isAdvanceOnlySibling(s *ParseState) bool {
+	return len(s.Extracts) == 0 && len(s.Advances) == 1 && s.Advances[0].Kind == AdvanceOpLookahead
+}
+
+// ownerCandidate returns the aux name a state nominates as the owner
+// of a trailing-array stack, or "" when the state's shape doesn't
+// match either of the two recognised forms (see resolveOwnedStacks).
+func ownerCandidate(s *ParseState, auxLayouts map[string]*AuxLayout) string {
+	if len(s.Advances) != 1 {
+		return ""
+	}
+	adv := s.Advances[0]
+	switch {
+	case len(s.Extracts) == 1 && !s.Extracts[0].IsStackPush && adv.Kind == AdvanceOpField:
+		auxName := s.Extracts[0].OutParam
+		if _, ok := auxLayouts[auxName]; ok && adv.Target == auxName {
+			return auxName
+		}
+	case isAdvanceOnlySibling(s) && strings.HasPrefix(s.Name, parseAuxStatePrefix):
+		// The slot prelude only fires for IsDynamicEligible auxes —
+		// dispatchedAuxKind is what marks them so, so this branch
+		// runs second and trusts that pre-pass.
+		auxName := strings.TrimPrefix(s.Name, parseAuxStatePrefix)
+		if layout, ok := auxLayouts[auxName]; ok && layout.IsDynamicEligible {
+			return auxName
+		}
+	}
+	return ""
+}
+
+// stackHasPush reports whether any state extracts via `<stackName>.next`.
+func stackHasPush(states []*ParseState, stackName string) bool {
+	for _, s := range states {
+		for _, ex := range s.Extracts {
+			if ex.IsStackPush && ex.StackName == stackName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dispatchedAuxKind reports the kind-byte dispatch case that targets
+// the `parse_<outName>` advance-only sibling, if any. Used to mark a
+// declared-but-not-extracted aux as queryable: the slot prelude
+// records R3 at sibling entry as the option's per-packet base, and
+// predicate codegen reads kind/length/blocks at slot+0/+1/+2 without
+// an explicit extract.
+func dispatchedAuxKind(states []*ParseState, outName string) (uint64, bool) {
+	target, idx := findStateByName(states, parseAuxStatePrefix+outName)
+	if target == nil || !isAdvanceOnlySibling(target) {
+		return 0, false
+	}
+	return dispatchKindForSibling(states, idx)
 }
 
 // findUniqueAuxExtractor scans all states for the (sole) state that
@@ -539,7 +696,23 @@ func buildState(s *p4lite.State, ctx *buildCtx) (*ParseState, error) {
 		return nil, fmt.Errorf("%s:%s: state %q pushes %d stack entries; MVP allows at most one stack push per state", ctx.source, s.Pos, s.Name, pushCount)
 	}
 	if len(ps.Advances) > 0 && len(ps.Extracts) > 0 {
-		return nil, fmt.Errorf("%s:%s: state %q mixes pkt.extract and pkt.advance; MVP requires the advance to live in its own state (R4 is fixed at primary-end on entry)", ctx.source, s.Pos, s.Name)
+		// Primary-targeted AdvanceField addressing assumes R4 is at
+		// primary-end on entry — folding state.OffsetAtEntry into a
+		// layer-relative byte load. Mixing it with an extract that
+		// has moved R4 already breaks that invariant. Aux-targeted
+		// AdvanceField, AdvanceOpLookahead (R4-relative), and
+		// AdvanceOpLiteral (fixed) all addr relative to the post-
+		// extract R4 so they're safe; the SACK shape (`extract(sack);
+		// advance((sack.length - 2) << 3);`) needs this co-residency.
+		for _, adv := range ps.Advances {
+			if adv.Kind != AdvanceOpField {
+				continue
+			}
+			h := ctx.headerRefs[adv.Target]
+			if h == ctx.primary {
+				return nil, fmt.Errorf("%s:%s: state %q mixes pkt.extract with primary-targeted pkt.advance; MVP requires the advance to live in its own state (R4 is fixed at primary-end on entry)", ctx.source, s.Pos, s.Name)
+			}
+		}
 	}
 
 	trans, err := buildTransition(s.Transition, ctx)
@@ -562,9 +735,15 @@ func buildCounter(cs *p4lite.CounterCallStmt, ctx *buildCtx) (CounterOp, error) 
 	}
 	switch cs.Op {
 	case p4lite.CounterSet:
-		skip, err := lowerCastShiftSkip(cs.Target, cs.FieldName, cs.BaseWords, cs.ScaleLog2, cs.Counter+".set", ctx, cs.Pos)
+		skip, h, err := lowerCastShiftSkip(cs.Target, cs.FieldName, cs.BaseWords, cs.ScaleLog2, cs.Counter+".set", ctx, cs.Pos)
 		if err != nil {
 			return CounterOp{}, err
+		}
+		// Counter set stores its byte expression into a layer-entry-
+		// anchored slot, so the source field must live in the primary
+		// header. Aux counters would need a different anchoring path.
+		if h != ctx.primary {
+			return CounterOp{}, fmt.Errorf("%s:%s: %s.set target %q is not the primary header %q", ctx.source, cs.Pos, cs.Counter, h.Name, ctx.primary.Name)
 		}
 		return CounterOp{
 			Kind:      CounterOpSet,
@@ -601,6 +780,7 @@ func buildExtract(es *p4lite.ExtractStmt, ctx *buildCtx) (ExtractOp, error) {
 			HeaderRef:   st.HeaderRef,
 			HeaderSize:  bits,
 			IsStackPush: true,
+			OutParam:    es.Target,
 			StackName:   es.Target,
 			Pos:         es.Pos,
 		}, nil
@@ -617,6 +797,7 @@ func buildExtract(es *p4lite.ExtractStmt, ctx *buildCtx) (ExtractOp, error) {
 		HeaderName: h.Name,
 		HeaderRef:  h,
 		HeaderSize: bits,
+		OutParam:   es.Target,
 		Pos:        es.Pos,
 	}, nil
 }
@@ -657,29 +838,30 @@ func buildAdvance(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
 
 // lowerCastShiftSkip lowers the `((bit<N>)(hdr.<F> - K)) << S`
 // template — shared by `pkt.advance` (AdvanceField) and
-// `<counter>.set` — into a HeaderLength five-tuple. variableTailSkip
-// consumes the result to drive a trailer skip; the counter-set path
-// stores the same byte count into a stack slot. opName labels the
-// source-level construct so error diagnostics still name what the
-// user wrote.
-func lowerCastShiftSkip(target, fieldName string, baseWords, scaleLog2 int, opName string, ctx *buildCtx, pos p4lite.Position) (*HeaderLength, error) {
+// `<counter>.set` — into a HeaderLength five-tuple plus the resolved
+// header pointer. variableTailSkip consumes the tuple to drive a
+// trailer skip; the counter-set path stores the same byte count into
+// a stack slot. opName labels the source-level construct so error
+// diagnostics still name what the user wrote. The returned header
+// lets callers apply their own primary-only check — counter.set
+// always wants primary (the layer-entry slot anchors the load),
+// pkt.advance permits aux for the SACK-style option-with-trailing-
+// array shape.
+func lowerCastShiftSkip(target, fieldName string, baseWords, scaleLog2 int, opName string, ctx *buildCtx, pos p4lite.Position) (*HeaderLength, *p4lite.Header, error) {
 	h, ok := ctx.headerRefs[target]
 	if !ok {
-		return nil, fmt.Errorf("%s:%s: %s target %q is not an `out` header parameter", ctx.source, pos, opName, target)
-	}
-	if h != ctx.primary {
-		return nil, fmt.Errorf("%s:%s: %s target %q is not the primary header %q", ctx.source, pos, opName, h.Name, ctx.primary.Name)
+		return nil, nil, fmt.Errorf("%s:%s: %s target %q is not an `out` header parameter", ctx.source, pos, opName, target)
 	}
 	bitOff, fieldBits, ok := findFieldBitWindow(h, fieldName)
 	if !ok {
-		return nil, fmt.Errorf("%s:%s: %s references unknown field %q in header %q", ctx.source, pos, opName, fieldName, h.Name)
+		return nil, nil, fmt.Errorf("%s:%s: %s references unknown field %q in header %q", ctx.source, pos, opName, fieldName, h.Name)
 	}
 	bitInByte := bitOff % 8
 	if bitInByte+fieldBits > 8 {
-		return nil, fmt.Errorf("%s:%s: %s field %q crosses a byte boundary (bits [%d,%d) — only single-byte fields are supported)", ctx.source, pos, opName, fieldName, bitOff, bitOff+fieldBits)
+		return nil, nil, fmt.Errorf("%s:%s: %s field %q crosses a byte boundary (bits [%d,%d) — only single-byte fields are supported)", ctx.source, pos, opName, fieldName, bitOff, bitOff+fieldBits)
 	}
 	if scaleLog2 < 3 {
-		return nil, fmt.Errorf("%s:%s: %s shift S=%d is sub-byte (codegen advances in whole bytes; require S ≥ 3)", ctx.source, pos, opName, scaleLog2)
+		return nil, nil, fmt.Errorf("%s:%s: %s shift S=%d is sub-byte (codegen advances in whole bytes; require S ≥ 3)", ctx.source, pos, opName, scaleLog2)
 	}
 	scaleBytes := 1 << (scaleLog2 - 3)
 	lsbShift := 8 - bitInByte - fieldBits
@@ -690,11 +872,11 @@ func lowerCastShiftSkip(target, fieldName string, baseWords, scaleLog2 int, opNa
 		LenShift:   lsbShift,
 		Scale:      scaleBytes,
 		Base:       baseWords * scaleBytes,
-	}, nil
+	}, h, nil
 }
 
 func buildAdvanceField(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
-	skip, err := lowerCastShiftSkip(as.Target, as.FieldName, as.BaseWords, as.ScaleLog2, "pkt.advance", ctx, as.Pos)
+	skip, _, err := lowerCastShiftSkip(as.Target, as.FieldName, as.BaseWords, as.ScaleLog2, "pkt.advance", ctx, as.Pos)
 	if err != nil {
 		return AdvanceOp{}, err
 	}

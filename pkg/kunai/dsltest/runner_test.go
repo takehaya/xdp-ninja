@@ -1,6 +1,7 @@
 package dsltest
 
 import (
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -569,6 +570,111 @@ func TestTCPOptionLookupNopPadding(t *testing.T) {
 		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}},
 	}
 	r.MustMatch(t, Build(t, o), "MSS after 2 NOPs — walk advances past padding")
+}
+
+// TestTCPOptionLookupSACKKind pins the dispatched-but-not-extracted
+// aux path: tcp_opt_sack_h is declared as an `out` param but never
+// extracted; the slot prelude records SACK's per-packet base when
+// the dispatch case kind=5 fires, and predicate codegen reads the
+// kind / length bytes from slot+0 / slot+1. A packet with a SACK
+// option (1 block = 10 bytes) following NOP padding must route
+// through parse_sack's lookahead-driven advance to land on the next
+// option's kind without state explosion in the bpf_loop callback.
+func TestTCPOptionLookupSACKKind(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where tcp.options.SACK.kind == 5")
+	o := Defaults()
+	o.TCPOptions = []layers.TCPOption{
+		{OptionType: layers.TCPOptionKindNop},
+		sackOption([2]uint32{1, 5}),
+	}
+	r.MustMatch(t, Build(t, o), "SACK option present — kind byte at slot reads 5")
+
+	// Same chain but no SACK option → the dispatch never targets
+	// parse_sack so the slot prelude leaves the SACK slot at its
+	// sentinel; predicate access must reject.
+	noSack := Defaults()
+	noSack.TCPOptions = []layers.TCPOption{
+		{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}},
+	}
+	r.MustReject(t, Build(t, noSack), "SACK absent — slot stays at sentinel, predicate rejects")
+}
+
+// sackOption packs N {left, right} edge pairs into a TCPOption with
+// kind=5 and the matching `2 + 8*N` length byte. Each pair is written
+// big-endian (network order) so the byte literal in tests reads as
+// the field value the DSL predicate compares against.
+func sackOption(blocks ...[2]uint32) layers.TCPOption {
+	data := make([]byte, 8*len(blocks))
+	for i, b := range blocks {
+		binary.BigEndian.PutUint32(data[i*8:], b[0])
+		binary.BigEndian.PutUint32(data[i*8+4:], b[1])
+	}
+	return layers.TCPOption{
+		OptionType:   layers.TCPOptionKindSACK,
+		OptionLength: uint8(2 + 8*len(blocks)),
+		OptionData:   data,
+	}
+}
+
+// TestTCPOptionLookupSACKBlockStaticIndex pins the static index path
+// for option-internal arrays — `tcp.options.SACK.blocks[0].left ==
+// 0x12345678` reads the first 4-byte block edge at slot+2+0*8 = +2
+// (the kind+length pair sits at slot+0..1, blocks start at +2).
+func TestTCPOptionLookupSACKBlockStaticIndex(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where tcp.options.SACK.blocks[0].left == 0x12345678")
+	o := Defaults()
+	o.TCPOptions = []layers.TCPOption{sackOption([2]uint32{0x12345678, 0x99})}
+	r.MustMatch(t, Build(t, o), "SACK blocks[0].left = 0x12345678 matches predicate")
+
+	mismatch := Defaults()
+	mismatch.TCPOptions = []layers.TCPOption{sackOption([2]uint32{0xabcdef01, 0x99})}
+	r.MustReject(t, Build(t, mismatch), "different left edge — predicate rejects")
+}
+
+// TestTCPOptionLookupSACKBlockSecondIndex exercises blocks[1] — same
+// shape but offset += 8 in the address compute. Two-block SACK
+// option.
+func TestTCPOptionLookupSACKBlockSecondIndex(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where tcp.options.SACK.blocks[1].right == 0x42")
+	o := Defaults()
+	o.TCPOptions = []layers.TCPOption{
+		sackOption([2]uint32{1, 5}, [2]uint32{0x10, 0x42}),
+	}
+	r.MustMatch(t, Build(t, o), "SACK blocks[1].right = 0x42 matches at slot+2+8+4")
+}
+
+// TestTCPOptionLookupSACKBlockAnyQuantifier exercises the any() form
+// over an option-internal array. The runtime count guard reads the
+// SACK option's length byte, subtracts 2 for the kind+length pair,
+// and right-shifts by 3 to get the live block count; iters past
+// that count fall through to the per-iter skip without bound errors.
+func TestTCPOptionLookupSACKBlockAnyQuantifier(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where any(tcp.options.SACK.blocks.left == 0x100)")
+	o := Defaults()
+	o.TCPOptions = []layers.TCPOption{
+		sackOption([2]uint32{1, 5}, [2]uint32{0x100, 0x200}),
+	}
+	r.MustMatch(t, Build(t, o), "any(blocks.left == 0x100): block 1 matches")
+
+	noMatch := Defaults()
+	noMatch.TCPOptions = []layers.TCPOption{sackOption([2]uint32{0x200, 0x300})}
+	r.MustReject(t, Build(t, noMatch), "single block, neither edge matches")
+}
+
+// TestTCPOptionLookupSACKBlockAllQuantifier exercises the all() form
+// — every live block must satisfy the inner predicate. Vacuous truth
+// when no SACK option is present (count guard rejects all iters).
+func TestTCPOptionLookupSACKBlockAllQuantifier(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where all(tcp.options.SACK.blocks.right > 0)")
+	o := Defaults()
+	o.TCPOptions = []layers.TCPOption{
+		sackOption([2]uint32{1, 5}, [2]uint32{0x10, 0x20}),
+	}
+	r.MustMatch(t, Build(t, o), "all blocks have right > 0")
+
+	zero := Defaults()
+	zero.TCPOptions = []layers.TCPOption{sackOption([2]uint32{1, 0})}
+	r.MustReject(t, Build(t, zero), "block 0.right = 0 fails the all() predicate")
 }
 
 // TestTCPOptionsMaxDataOffset drives data_offset=15 (maximum),

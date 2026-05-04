@@ -84,6 +84,12 @@ func dynamicAuxLayoutOf(f *ir.FieldRef) *vocab.AuxLayout {
 	if f == nil || f.Aux == nil || f.Layer == nil || f.Layer.Spec == nil {
 		return nil
 	}
+	// Owner-bound stacks ride past their option's per-packet base.
+	// The slot the demand walker records is the owner's, not the
+	// stack's — the stack header itself has no AuxLayout entry.
+	if f.Aux.OwnerOption != nil {
+		return f.Aux.OwnerOption
+	}
 	machine := f.Layer.Spec.ParseStateMachine
 	if machine == nil {
 		return nil
@@ -142,9 +148,13 @@ func (qo queriedOptions) dynamicAuxSlotForLayout(layer *ir.LayerInstance, layout
 
 // dynamicAuxOffsetSlot returns the stack slot at index `slotIdx`
 // (1-based) for a layer at position `layerPos`. The block descends
-// from -256 in 8-byte steps; cap is dynamicAuxMaxSlotsPerLayer = 4
-// (TCP's queryable kind count), expand when a future vocab needs
-// more.
+// from -256 in 8-byte steps; cap is dynamicAuxMaxSlotsPerLayer = 5
+// (TCP's MSS, WS, SACK_PERM, SACK, TS). Worst-case usage is
+// layerPos×5×8 + 5×8 bytes below the base; with the 12-layer
+// where-slot cap a chain can address up to TCP at layerPos=5
+// (covers eth/ipv4/udp/gtp/ipv4/tcp). Expanding past 5 trims the
+// addressable depth further — needs either a denser slot allocator
+// (only allocate for layers that actually query) or a wider region.
 //
 // Bounds-checks against the 512-byte BPF stack so deep chains with
 // many TLV-walk-bearing layers can't silently land outside the
@@ -152,7 +162,7 @@ func (qo queriedOptions) dynamicAuxSlotForLayout(layer *ir.LayerInstance, layout
 // but failing here gives the user the layer index and a chain-
 // shape pointer instead of a verifier opcode dump.
 const dynamicAuxOffsetSlotBase = int16(-256)
-const dynamicAuxMaxSlotsPerLayer = 4
+const dynamicAuxMaxSlotsPerLayer = 5
 const bpfStackBottom = int16(-512)
 
 func dynamicAuxOffsetSlot(layerPos, slotIdx int) (int16, error) {

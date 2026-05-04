@@ -267,14 +267,14 @@ func TestLoadEthMplsNoCheck(t *testing.T) {
 // declares — each one's aux header should land in AuxLayouts with
 // IsDynamicEligible = true and the kind byte recovered from the
 // parser block's `transition select` case label (= MSS_KIND = 2,
-// WS_KIND = 3, SACK_PERM_KIND = 4, TS_KIND = 8).
+// WS_KIND = 3, SACK_PERM_KIND = 4, SACK_KIND = 5, TS_KIND = 8).
 func TestComputeAuxLayoutsTcpKindBytes(t *testing.T) {
 	specs := loadBundled(t)
 	tcp := specs["tcp"]
 	if tcp == nil || tcp.ParseStateMachine == nil {
 		t.Fatal("tcp.ParseStateMachine missing")
 	}
-	want := map[string]uint64{"mss": 2, "ws": 3, "sack_perm": 4, "ts": 8}
+	want := map[string]uint64{"mss": 2, "ws": 3, "sack_perm": 4, "sack": 5, "ts": 8}
 	got := map[string]uint64{}
 	for outName, layout := range tcp.ParseStateMachine.AuxLayouts {
 		if !layout.IsDynamicEligible {
@@ -1109,7 +1109,7 @@ parser P(packet_in pkt, out foo_h hdr) {
 		transition accept;
 	}
 }`,
-			"mixes pkt.extract and pkt.advance",
+			"mixes pkt.extract with primary-targeted pkt.advance",
 		},
 	}
 	for _, tc := range cases {
@@ -1174,6 +1174,128 @@ parser P(packet_in pkt, out foo_h hdr) {
 	adv := specs["foo"].ParseStateMachine.States[1].Advances[0]
 	if adv.Kind != AdvanceOpLiteral || adv.LiteralBytes != 1 {
 		t.Errorf("adv = %+v, want Kind=AdvanceOpLiteral LiteralBytes=1", adv)
+	}
+}
+
+// TestOwnedStackResolution pins the `out H[N] x` auto-binding rule
+// the loader applies to declared-but-not-extracted stacks. A kind+
+// length aux header `opt_h` followed by fixed-element `block_h`
+// records is the canonical SACK-blocks layout: the parser-state
+// shape `extract(opt); advance(opt.length...);` is the unique
+// candidate sibling, so the loader binds `blocks` to owner `opt`
+// with OffsetAfterOwner = 2 (= opt's HeaderSize in bytes).
+func TestOwnedStackResolution(t *testing.T) {
+	src := `header foo_h { bit<16> ethertype; }
+header opt_h { bit<8> kind; bit<8> length; }
+header block_h { bit<32> left; bit<32> right; }
+
+const bit<16> FOO_ETH_ETHERTYPE = 0x88aa;
+
+parser P(packet_in pkt, out foo_h hdr, out opt_h opt, out block_h[2] blocks) {
+	state start {
+		pkt.extract(hdr);
+		transition parse_opt;
+	}
+	state parse_opt {
+		pkt.extract(opt);
+		pkt.advance(((bit<32>)(opt.length - 2)) << 3);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	specs, err := Load(fsys, "vocab")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	stack, ok := specs["foo"].ParseStateMachine.StackRefs["blocks"]
+	if !ok {
+		t.Fatalf("StackRefs[blocks] missing; got %+v", specs["foo"].ParseStateMachine.StackRefs)
+	}
+	if stack.OwnerOption != "opt" {
+		t.Errorf("stack.OwnerOption = %q, want %q", stack.OwnerOption, "opt")
+	}
+	if stack.OffsetAfterOwner != 2 {
+		t.Errorf("stack.OffsetAfterOwner = %d, want 2 (= opt header size)", stack.OffsetAfterOwner)
+	}
+}
+
+// TestOwnedStackTopLevelUnchanged pins that stacks with no owner-
+// candidate sibling stay top-level (OwnerOption empty). srv6.segments
+// is the canonical case — declared but not extracted, anchored to
+// the layer's variable trail rather than an option. Uses a select-
+// based start (mirroring srv6's self-validating dispatch) so the
+// loader keeps the ParseStateMachine non-nil instead of collapsing
+// to the trivial single-state shape.
+func TestOwnedStackTopLevelUnchanged(t *testing.T) {
+	src := `header foo_h { bit<8> nh; bit<8> hdr_ext_len; bit<8> rt_type; bit<8> seg_left; bit<32> rsvd; }
+header seg_h { bit<128> addr; }
+
+const bit<8> FOO_IPV6_NEXT_HEADER = 43;
+
+parser P(packet_in pkt, out foo_h hdr, out seg_h[8] segments) {
+	state start {
+		pkt.extract(hdr);
+		transition select(hdr.rt_type) {
+			4:       accept;
+			default: reject;
+		}
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	specs, err := Load(fsys, "vocab")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	stack, ok := specs["foo"].ParseStateMachine.StackRefs["segments"]
+	if !ok {
+		t.Fatalf("StackRefs[segments] missing")
+	}
+	if stack.OwnerOption != "" {
+		t.Errorf("stack.OwnerOption = %q, want empty (top-level stack should not auto-bind)", stack.OwnerOption)
+	}
+	if stack.OffsetAfterOwner != 0 {
+		t.Errorf("stack.OffsetAfterOwner = %d, want 0", stack.OffsetAfterOwner)
+	}
+}
+
+// TestOwnedStackAmbiguousErrors pins that two sibling states matching
+// the option-with-trailing-array shape force a loader error rather
+// than a silent first-wins binding — at most one candidate per
+// parser block.
+func TestOwnedStackAmbiguousErrors(t *testing.T) {
+	src := `header foo_h { bit<8> tag; }
+header opt_a_h { bit<8> kind; bit<8> length; }
+header opt_b_h { bit<8> kind; bit<8> length; }
+header block_h { bit<32> left; bit<32> right; }
+
+const bit<16> FOO_ETH_ETHERTYPE = 0x88ab;
+
+parser P(packet_in pkt, out foo_h hdr, out opt_a_h opt_a, out opt_b_h opt_b, out block_h[2] blocks) {
+	state start {
+		pkt.extract(hdr);
+		transition select(hdr.tag) {
+			0:       parse_a;
+			default: parse_b;
+		}
+	}
+	state parse_a {
+		pkt.extract(opt_a);
+		pkt.advance(((bit<32>)(opt_a.length - 2)) << 3);
+		transition accept;
+	}
+	state parse_b {
+		pkt.extract(opt_b);
+		pkt.advance(((bit<32>)(opt_b.length - 2)) << 3);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("Load: expected ambiguous-owner error, got nil")
+	}
+	if !strings.Contains(err.Error(), "owner-bound ambiguous") {
+		t.Errorf("err = %v; want containing %q", err, "owner-bound ambiguous")
 	}
 }
 

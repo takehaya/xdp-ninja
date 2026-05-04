@@ -204,6 +204,14 @@ type AuxRef struct {
 	// Stack is non-nil when this AuxRef indexes into an aux header
 	// stack (`out <type>[N] segments`) instead of a single aux.
 	Stack *StackIndex
+	// OwnerOption is non-nil when the stack lives past an option
+	// aux's per-packet base rather than the layer's variable trail.
+	// Address compute becomes
+	// slot[OwnerOption] + OffsetAfterOwner + index*HeaderSize +
+	// FieldBitOff/8, routed through the dynamic-aux slot allocator
+	// instead of the layer-entry anchor.
+	OwnerOption      *vocab.AuxLayout
+	OffsetAfterOwner int
 }
 
 // StackIndex describes which element of an aux header stack a

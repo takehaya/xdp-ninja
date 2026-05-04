@@ -420,6 +420,20 @@ type HeaderStack struct {
 	HeaderRef  *p4lite.Header
 	Capacity   int
 	ElemSize   int // bytes; matches the referenced header's byte-aligned size
+	// OwnerOption names the AuxLayout this stack rides past — set
+	// when the stack is declared but never extracted, and a sibling
+	// state has the option-with-trailing-array shape (`extract(aux);
+	// advance(aux.<len-field>...)`). The stack base on a given packet
+	// is the owner aux's per-packet offset slot value plus
+	// OffsetAfterOwner. Empty for top-level stacks (srv6.segments,
+	// ipv6.exts) which anchor to the layer entry directly.
+	OwnerOption string
+	// OffsetAfterOwner caches the byte distance from the owner aux's
+	// per-packet base to the first stack element. Derivable from
+	// AuxLayouts[OwnerOption].HeaderSize but inlined here so codegen
+	// avoids a second map lookup per access. Zero when OwnerOption
+	// is empty.
+	OffsetAfterOwner int
 }
 
 // ParseState is a single state in the machine. Extracts run in
@@ -451,6 +465,7 @@ type ExtractOp struct {
 	HeaderRef   *p4lite.Header // pointer into File.Headers (do not mutate)
 	HeaderSize  int            // bits, byte-aligned
 	IsStackPush bool           // true when target is `<stack>.next`
+	OutParam    string         // parser out-param name (== StackName when IsStackPush)
 	StackName   string         // when IsStackPush, the stack parameter name
 	Pos         p4lite.Position
 }
