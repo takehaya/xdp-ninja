@@ -69,7 +69,7 @@ const bit<4> IPV4_MPLS_SANITY_NIBBLE = 4;
 
 func TestParseSimpleParser(t *testing.T) {
 	src := `
-parser EthFragment(packet_in pkt, out eth_h hdr) {
+parser EthParser(packet_in pkt, out eth_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;
@@ -84,7 +84,7 @@ parser EthFragment(packet_in pkt, out eth_h hdr) {
 		t.Fatalf("parsers=%d", len(f.Parsers))
 	}
 	par := f.Parsers[0]
-	if par.Name != "EthFragment" {
+	if par.Name != "EthParser" {
 		t.Errorf("name %q", par.Name)
 	}
 	if len(par.Params) != 2 {
@@ -171,7 +171,7 @@ parser P(packet_in pkt, out h_t hdr) {
 
 func TestParseChainSelfReference(t *testing.T) {
 	src := `
-parser GtpFragment(packet_in pkt, out gtp_h gtp, out gtp_opt_h opt, out gtp_ext_h[8] exts) {
+parser GtpParser(packet_in pkt, out gtp_h gtp, out gtp_opt_h opt, out gtp_ext_h[8] exts) {
     state start {
         pkt.extract(gtp);
         transition select(gtp.e, gtp.s, gtp.pn) {
@@ -241,7 +241,6 @@ func TestParseRejectsReservedKeywords(t *testing.T) {
 		{"table", "table t { }"},
 		{"control", "control C() { }"},
 		{"apply", "apply { }"},
-		{"extern", "extern e;"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -631,5 +630,223 @@ func TestParseRejectsUnknownMethodCall(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported method") {
 		t.Errorf("err = %q; want unsupported-method hint", err.Error())
+	}
+}
+
+// --- ParserCounter (extern + instance + ops + select key) ---
+
+func TestParseExternRoundTrip(t *testing.T) {
+	src := `extern ParserCounter {
+		ParserCounter();
+		void set(in bit<8> value);
+		void decrement(in bit<8> value);
+		bool is_zero();
+	}
+
+	parser P(packet_in pkt, out h_t hdr) {
+		state start { transition accept; }
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Externs) != 1 {
+		t.Fatalf("externs=%d, want 1", len(f.Externs))
+	}
+	if f.Externs[0].Name != "ParserCounter" {
+		t.Errorf("name = %q, want ParserCounter", f.Externs[0].Name)
+	}
+	if len(f.Parsers) != 1 {
+		t.Fatalf("parsers=%d, want 1", len(f.Parsers))
+	}
+}
+
+func TestParseExternUnterminated(t *testing.T) {
+	_, err := Parse([]byte("extern ParserCounter { void set(in bit<8> v);"), "t.p4")
+	if err == nil {
+		t.Fatal("expected error for unterminated extern body")
+	}
+	if !strings.Contains(err.Error(), "unterminated extern") {
+		t.Errorf("err = %q; want 'unterminated extern' hint", err.Error())
+	}
+}
+
+func TestParseCounterInstanceRoundTrip(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state start { transition accept; }
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	par := f.Parsers[0]
+	if len(par.Counters) != 1 {
+		t.Fatalf("counters=%d, want 1", len(par.Counters))
+	}
+	if par.Counters[0].Name != "pc" {
+		t.Errorf("name = %q, want pc", par.Counters[0].Name)
+	}
+}
+
+func TestParseCounterInstanceRejectsDuplicate(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		ParserCounter() pc;
+		state start { transition accept; }
+	}`
+	_, err := Parse([]byte(src), "t.p4")
+	if err == nil {
+		t.Fatal("expected duplicate-counter error")
+	}
+	if !strings.Contains(err.Error(), "already declared") {
+		t.Errorf("err = %q; want duplicate hint", err.Error())
+	}
+}
+
+func TestParseCounterSetRoundTrip(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state s {
+			pc.set(((bit<8>)(hdr.ihl - 5)) << 2);
+			transition accept;
+		}
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	stmts := f.Parsers[0].States[0].Stmts
+	if len(stmts) != 1 {
+		t.Fatalf("stmts=%d, want 1", len(stmts))
+	}
+	cs, ok := stmts[0].(*CounterCallStmt)
+	if !ok {
+		t.Fatalf("stmt[0] is %T, want *CounterCallStmt", stmts[0])
+	}
+	want := CounterCallStmt{
+		Counter:   "pc",
+		Op:        CounterSet,
+		BitWidth:  8,
+		Target:    "hdr",
+		FieldName: "ihl",
+		BaseWords: 5,
+		ScaleLog2: 2,
+	}
+	if cs.Counter != want.Counter || cs.Op != want.Op || cs.BitWidth != want.BitWidth ||
+		cs.Target != want.Target || cs.FieldName != want.FieldName ||
+		cs.BaseWords != want.BaseWords || cs.ScaleLog2 != want.ScaleLog2 {
+		t.Errorf("CounterCallStmt = %+v, want %+v", *cs, want)
+	}
+}
+
+func TestParseCounterDecrementRoundTrip(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state s {
+			pc.decrement(4);
+			transition accept;
+		}
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cs := f.Parsers[0].States[0].Stmts[0].(*CounterCallStmt)
+	if cs.Op != CounterDecrement || cs.LiteralBytes != 4 || cs.Counter != "pc" {
+		t.Errorf("CounterCallStmt = %+v, want decrement(pc, 4)", *cs)
+	}
+}
+
+func TestParseCounterDecrementRejectsZero(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state s {
+			pc.decrement(0);
+			transition accept;
+		}
+	}`
+	_, err := Parse([]byte(src), "t.p4")
+	if err == nil {
+		t.Fatal("expected error for decrement(0)")
+	}
+	if !strings.Contains(err.Error(), "no-op") {
+		t.Errorf("err = %q; want no-op hint", err.Error())
+	}
+}
+
+func TestParseCounterSetRejectsLookaheadOperand(t *testing.T) {
+	// Counter set deliberately accepts only the field cast-shift form;
+	// the lookahead operand is meaningful for trailer skips but not for
+	// loading a header-derived byte count.
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state s {
+			pc.set(((bit<32>)pkt.lookahead<bit<16>>()[7:0]) << 3);
+			transition accept;
+		}
+	}`
+	_, err := Parse([]byte(src), "t.p4")
+	if err == nil {
+		t.Fatal("expected error for lookahead operand in pc.set")
+	}
+	if !strings.Contains(err.Error(), "lookahead form not supported") {
+		t.Errorf("err = %q; want lookahead-form hint", err.Error())
+	}
+}
+
+func TestParseCounterIsZeroSelectKey(t *testing.T) {
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		ParserCounter() pc;
+		state s {
+			transition select(pc.is_zero()) {
+				true:  accept;
+				false: reject;
+			}
+		}
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	tr := f.Parsers[0].States[0].Transition
+	if tr.Kind != TransSelect {
+		t.Fatalf("transition kind = %d, want TransSelect", tr.Kind)
+	}
+	keys := tr.Select.Keys
+	if len(keys) != 1 || keys[0].Kind != SelectKeyCounterIsZero || keys[0].Counter != "pc" {
+		t.Fatalf("keys = %+v, want one SelectKeyCounterIsZero(pc)", keys)
+	}
+	cs := tr.Select.Cases
+	if len(cs) != 2 {
+		t.Fatalf("cases=%d, want 2", len(cs))
+	}
+	if !cs[0].Values[0].IsBool || !cs[0].Values[0].Bool {
+		t.Errorf("case[0] match = %+v, want true", cs[0].Values[0])
+	}
+	if !cs[1].Values[0].IsBool || cs[1].Values[0].Bool {
+		t.Errorf("case[1] match = %+v, want false", cs[1].Values[0])
+	}
+}
+
+func TestParseCounterIsZeroFallthroughOnPlainPath(t *testing.T) {
+	// `ihl.foo` is a regular dotted path, NOT a counter is_zero — ensure
+	// the speculative counter-key match rewinds cleanly when `.is_zero`
+	// is not present.
+	src := `parser P(packet_in pkt, out h_t hdr) {
+		state s {
+			transition select(hdr.foo) {
+				0: accept;
+				default: reject;
+			}
+		}
+	}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := f.Parsers[0].States[0].Transition.Select.Keys
+	if len(keys) != 1 || keys[0].Kind != SelectKeyField || keys[0].Path != "hdr.foo" {
+		t.Errorf("keys = %+v, want one SelectKeyField(hdr.foo)", keys)
 	}
 }

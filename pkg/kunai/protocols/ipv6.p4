@@ -44,7 +44,7 @@ const bit<8> IPV6_MAX_DEPTH = 4;
 // next_header dispatching is unchanged from the pre-migration shape:
 // 0 / 44 / 60 walk into ext-chain parsing, anything else accepts the
 // primary header and lets the outer chain pick the next protocol.
-parser IPv6Fragment(packet_in pkt,
+parser IPv6Parser(packet_in pkt,
                     out ipv6_h hdr,
                     out ipv6_ext_h[8] exts) {
     state start {

@@ -146,7 +146,7 @@ eth/ipv4/udp/gtp/ipv4/tcp where gtp.exts[0].ext_type == 1            # 最初の
 # TCP option lookup (走査して match)
 eth/ipv4/tcp where tcp.options.MSS.value == 1460
 eth/ipv4/tcp where tcp.options.WS.shift > 5
-eth/ipv4/tcp where tcp.options.TS.val > 0
+eth/ipv4/tcp where tcp.options.TS.tsval > 0
 ```
 
 #### Quantifier (`any` / `all`)

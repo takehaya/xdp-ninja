@@ -58,7 +58,20 @@ func (e *SyntaxError) Error() string {
 type File struct {
 	Headers []*Header
 	Consts  []*Const
+	Externs []*Extern
 	Parsers []*Parser
+}
+
+// Extern is an architectural extern declaration — kept as an opaque
+// token so vocab files can declare types the host architecture
+// supplies (currently only `extern ParserCounter`). p4lite only
+// records the name; the body is skipped through balanced braces so
+// the loader doesn't have to model method signatures.
+//
+// BNF: externDeclaration (P4-16 Section 7.2.10 "Externs")
+type Extern struct {
+	Name string
+	Pos  Position
 }
 
 // Header is a `header H { bit<N> f; ... }` declaration.
@@ -95,10 +108,22 @@ type Const struct {
 //
 // BNF: parserDeclaration (P4-16 Section 13.2 "Parser declarations")
 type Parser struct {
-	Name   string
-	Params []Param
-	States []*State
-	Pos    Position
+	Name     string
+	Params   []Param
+	Counters []CounterInst
+	States   []*State
+	Pos      Position
+}
+
+// CounterInst is a `ParserCounter() <name>;` instance declaration
+// inside a parser block — the in-parser handle to a ParserCounter
+// extern. p4lite enforces the type to be ParserCounter; other extern
+// instantiations are out of subset scope.
+//
+// BNF: instantiation (P4-16 Section 11.4 "Instantiations")
+type CounterInst struct {
+	Name string
+	Pos  Position
 }
 
 // Param is one entry in a parser's parameter list, e.g. `packet_in
@@ -197,6 +222,51 @@ type AdvanceStmt struct {
 
 func (*AdvanceStmt) stmtNode() {}
 
+// CounterCallKind tags CounterCallStmt with which method on the
+// ParserCounter handle was invoked. p4lite recognises the two ops the
+// codegen needs: a `set` that loads a byte count, and a `decrement`
+// that subtracts a literal byte count per iteration.
+type CounterCallKind int
+
+const (
+	// CounterSet is `<counter>.set(((bit<N>)(hdr.<F> - K)) << S)` — load
+	// a header-derived byte count into the counter slot. The arg shares
+	// the AdvanceField cast-and-shift template so the resulting byte
+	// expression is the same one Stage 2 already lowers for trailer
+	// skips.
+	CounterSet CounterCallKind = iota
+	// CounterDecrement is `<counter>.decrement(<INT>)` — subtract a
+	// literal byte count from the counter (the value is fixed per
+	// state because each parse_options iteration consumes a
+	// known-size option block).
+	CounterDecrement
+)
+
+// CounterCallStmt represents `<counter>.<method>(<arg>);` inside a
+// parser-state body — the only call shapes p4lite emits against a
+// ParserCounter handle. The Counter field names the in-parser instance
+// (matching one of Parser.Counters) so resolution can find it without
+// an extra lookup table.
+//
+// BNF: parserStatement (the methodCall variant, P4-16 Section 13.5)
+type CounterCallStmt struct {
+	Counter string
+	Op      CounterCallKind
+	Pos     Position
+
+	// CounterSet only: shares AdvanceField's cast-and-shift template.
+	BitWidth  int    // the N in `(bit<N>) ...`
+	Target    string // the `hdr` in `hdr.<F>` (parser's `out` parameter)
+	FieldName string // the `<F>` in `hdr.<F>`
+	BaseWords int    // the K subtracted from the field value
+	ScaleLog2 int    // the S in `<< S` (unit: bits, like AdvanceField)
+
+	// CounterDecrement only.
+	LiteralBytes int
+}
+
+func (*CounterCallStmt) stmtNode() {}
+
 // TransKind tags Transition with which transition shape was parsed.
 type TransKind int
 
@@ -230,6 +300,10 @@ const (
 	// SelectKeyLookahead is `pkt.lookahead<bit<N>>()` — peek N
 	// bits ahead without advancing R4. Bits = N; Path is unused.
 	SelectKeyLookahead
+	// SelectKeyCounterIsZero is `<counter>.is_zero()` — peek the
+	// remaining-bytes counter without mutating it. Counter names the
+	// instance; Path / Bits unused.
+	SelectKeyCounterIsZero
 )
 
 // SelectKey is one slot of a `transition select(...)` tuple —
@@ -237,10 +311,11 @@ const (
 // shape) or a `pkt.lookahead<bit<N>>()` peek of the next N
 // unconsumed bits.
 type SelectKey struct {
-	Kind SelectKeyKind
-	Path string // valid when Kind == SelectKeyField
-	Bits int    // valid when Kind == SelectKeyLookahead
-	Pos  Position
+	Kind    SelectKeyKind
+	Path    string // valid when Kind == SelectKeyField
+	Bits    int    // valid when Kind == SelectKeyLookahead
+	Counter string // valid when Kind == SelectKeyCounterIsZero
+	Pos     Position
 }
 
 // Select is the `select(key1, key2) { case...; default: ...; }`
@@ -264,13 +339,16 @@ type Case struct {
 	Pos       Position
 }
 
-// Match is one slot of a select case keyset — a literal integer or
-// the `_` wildcard.
+// Match is one slot of a select case keyset — a literal integer, a
+// `_` wildcard, or a boolean literal (the latter only meaningful for
+// `<counter>.is_zero()` keys).
 //
 // BNF: keysetExpression (P4-16 Section 13.6, simpleKeysetExpression
 // alternatives: number, '_', default)
 type Match struct {
-	IsWildcard bool // true for "_"
-	Value      uint64
+	IsWildcard bool   // true for "_"
+	IsBool     bool   // true when Bool/case is `true` or `false`
+	Bool       bool   // valid when IsBool
+	Value      uint64 // valid otherwise
 	Pos        Position
 }

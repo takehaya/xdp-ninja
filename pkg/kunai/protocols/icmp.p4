@@ -8,7 +8,7 @@ header icmp_h {
 
 const bit<8> ICMP_IPV4_PROTOCOL = 1;
 
-parser IcmpFragment(packet_in pkt, out icmp_h hdr) {
+parser IcmpParser(packet_in pkt, out icmp_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;

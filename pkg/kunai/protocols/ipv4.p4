@@ -39,7 +39,7 @@ const bit<16> IPV4_GRE_PROTOCOL_TYPE = 0x0800;
 // options length. IHL < 5 underflows the `bit<32>` arithmetic, which
 // codegen catches with an explicit lower-bound check before it can
 // advance R4.
-parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
+parser IPv4Parser(packet_in pkt, out ipv4_h hdr) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version) {

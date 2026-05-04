@@ -22,8 +22,21 @@ type buildCtx struct {
 	headerRefs map[string]*p4lite.Header
 	stackRefs  map[string]*HeaderStack
 	stateIdx   map[string]int
+	counters   []CounterInst // declared ParserCounter instances, source order
 	source     string
 	primary    *p4lite.Header // pkt.advance must reference this header
+}
+
+// hasCounter is the membership test counter ops scope-check against.
+// Counter lists are expected to be tiny (1-2 instances per parser),
+// so the linear scan is not measurable.
+func (ctx *buildCtx) hasCounter(name string) bool {
+	for _, c := range ctx.counters {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // buildParseStateMachine constructs a ParseStateMachine from a
@@ -59,10 +72,13 @@ func buildParseStateMachine(file *p4lite.File, primary *p4lite.Header, source st
 		return nil, fmt.Errorf("%s:%s: parser %q has %d states; MVP cap is %d", source, p.Pos, p.Name, len(p.States), parserMachineMaxStates)
 	}
 
+	counters := resolveCounters(p)
+
 	ctx := &buildCtx{
 		headerRefs: headerRefs,
 		stackRefs:  stackRefs,
 		stateIdx:   stateIdx,
+		counters:   counters,
 		source:     source,
 		primary:    primary,
 	}
@@ -98,8 +114,23 @@ func buildParseStateMachine(file *p4lite.File, primary *p4lite.Header, source st
 		EntryIdx:   entryIdx,
 		HeaderRefs: headerRefs,
 		StackRefs:  stackRefs,
+		Counters:   counters,
 		AuxLayouts: auxLayouts,
 	}, nil
+}
+
+// resolveCounters lifts the parser block's ParserCounter instances
+// into machine-level CounterInst entries (source order). Duplicate
+// names already error in p4lite, so this is a straight copy.
+func resolveCounters(p *p4lite.Parser) []CounterInst {
+	if len(p.Counters) == 0 {
+		return nil
+	}
+	counters := make([]CounterInst, 0, len(p.Counters))
+	for _, c := range p.Counters {
+		counters = append(counters, CounterInst{Name: c.Name, Pos: c.Pos})
+	}
+	return counters
 }
 
 // computeAuxLayouts walks the state machine to derive each aux header's
@@ -494,6 +525,12 @@ func buildState(s *p4lite.State, ctx *buildCtx) (*ParseState, error) {
 				return nil, err
 			}
 			ps.Advances = append(ps.Advances, op)
+		case *p4lite.CounterCallStmt:
+			op, err := buildCounter(v, ctx)
+			if err != nil {
+				return nil, err
+			}
+			ps.Counters = append(ps.Counters, op)
 		default:
 			return nil, fmt.Errorf("%s:%s: state %q contains an unsupported statement type %T", ctx.source, s.Pos, s.Name, stmt)
 		}
@@ -511,6 +548,41 @@ func buildState(s *p4lite.State, ctx *buildCtx) (*ParseState, error) {
 	}
 	ps.Trans = trans
 	return ps, nil
+}
+
+// buildCounter resolves a `<counter>.set(...)` or
+// `<counter>.decrement(<INT>)` call against the parser block's
+// ParserCounter instances. The Counter name must match a declared
+// instance; the set form shares AdvanceField's cast-and-shift
+// lowering so the counter is loaded with the same byte expression
+// trailer-skip already understands.
+func buildCounter(cs *p4lite.CounterCallStmt, ctx *buildCtx) (CounterOp, error) {
+	if !ctx.hasCounter(cs.Counter) {
+		return CounterOp{}, fmt.Errorf("%s:%s: counter %q is not declared as a `ParserCounter()` instance in this parser block", ctx.source, cs.Pos, cs.Counter)
+	}
+	switch cs.Op {
+	case p4lite.CounterSet:
+		skip, err := lowerCastShiftSkip(cs.Target, cs.FieldName, cs.BaseWords, cs.ScaleLog2, cs.Counter+".set", ctx, cs.Pos)
+		if err != nil {
+			return CounterOp{}, err
+		}
+		return CounterOp{
+			Kind:      CounterOpSet,
+			Counter:   cs.Counter,
+			Target:    cs.Target,
+			FieldName: cs.FieldName,
+			Skip:      skip,
+			Pos:       cs.Pos,
+		}, nil
+	case p4lite.CounterDecrement:
+		return CounterOp{
+			Kind:         CounterOpDecrement,
+			Counter:      cs.Counter,
+			LiteralBytes: cs.LiteralBytes,
+			Pos:          cs.Pos,
+		}, nil
+	}
+	return CounterOp{}, fmt.Errorf("%s:%s: unknown counter op %d", ctx.source, cs.Pos, cs.Op)
 }
 
 // buildExtract resolves an `obj.extract(<var>)` or
@@ -583,55 +655,65 @@ func buildAdvance(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
 	return AdvanceOp{}, fmt.Errorf("%s:%s: unknown pkt.advance template kind %d", ctx.source, as.Pos, as.Kind)
 }
 
-// scaleBytesFromLog2 converts the AdvanceStmt's `<< S` shift count
-// (in bits) into a whole-byte multiplier. S < 3 makes the shift
-// sub-byte, which has no codegen path — R4 advances in bytes.
+// lowerCastShiftSkip lowers the `((bit<N>)(hdr.<F> - K)) << S`
+// template — shared by `pkt.advance` (AdvanceField) and
+// `<counter>.set` — into a HeaderLength five-tuple. variableTailSkip
+// consumes the result to drive a trailer skip; the counter-set path
+// stores the same byte count into a stack slot. opName labels the
+// source-level construct so error diagnostics still name what the
+// user wrote.
+func lowerCastShiftSkip(target, fieldName string, baseWords, scaleLog2 int, opName string, ctx *buildCtx, pos p4lite.Position) (*HeaderLength, error) {
+	h, ok := ctx.headerRefs[target]
+	if !ok {
+		return nil, fmt.Errorf("%s:%s: %s target %q is not an `out` header parameter", ctx.source, pos, opName, target)
+	}
+	if h != ctx.primary {
+		return nil, fmt.Errorf("%s:%s: %s target %q is not the primary header %q", ctx.source, pos, opName, h.Name, ctx.primary.Name)
+	}
+	bitOff, fieldBits, ok := findFieldBitWindow(h, fieldName)
+	if !ok {
+		return nil, fmt.Errorf("%s:%s: %s references unknown field %q in header %q", ctx.source, pos, opName, fieldName, h.Name)
+	}
+	bitInByte := bitOff % 8
+	if bitInByte+fieldBits > 8 {
+		return nil, fmt.Errorf("%s:%s: %s field %q crosses a byte boundary (bits [%d,%d) — only single-byte fields are supported)", ctx.source, pos, opName, fieldName, bitOff, bitOff+fieldBits)
+	}
+	if scaleLog2 < 3 {
+		return nil, fmt.Errorf("%s:%s: %s shift S=%d is sub-byte (codegen advances in whole bytes; require S ≥ 3)", ctx.source, pos, opName, scaleLog2)
+	}
+	scaleBytes := 1 << (scaleLog2 - 3)
+	lsbShift := 8 - bitInByte - fieldBits
+	mask := ((1 << fieldBits) - 1) << lsbShift
+	return &HeaderLength{
+		LenByteOff: bitOff / 8,
+		LenMask:    mask,
+		LenShift:   lsbShift,
+		Scale:      scaleBytes,
+		Base:       baseWords * scaleBytes,
+	}, nil
+}
+
+func buildAdvanceField(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
+	skip, err := lowerCastShiftSkip(as.Target, as.FieldName, as.BaseWords, as.ScaleLog2, "pkt.advance", ctx, as.Pos)
+	if err != nil {
+		return AdvanceOp{}, err
+	}
+	return AdvanceOp{
+		Kind:      AdvanceOpField,
+		Target:    as.Target,
+		FieldName: as.FieldName,
+		Skip:      skip,
+		Pos:       as.Pos,
+	}, nil
+}
+
+// scaleBytesFromLog2 keeps AdvanceLookahead's pre-existing call site
+// working. Mirrors the scale check inside lowerCastShiftSkip.
 func scaleBytesFromLog2(as *p4lite.AdvanceStmt, ctx *buildCtx) (int, error) {
 	if as.ScaleLog2 < 3 {
 		return 0, fmt.Errorf("%s:%s: pkt.advance shift S=%d is sub-byte (codegen advances in whole bytes; require S ≥ 3)", ctx.source, as.Pos, as.ScaleLog2)
 	}
 	return 1 << (as.ScaleLog2 - 3), nil
-}
-
-func buildAdvanceField(as *p4lite.AdvanceStmt, ctx *buildCtx) (AdvanceOp, error) {
-	h, ok := ctx.headerRefs[as.Target]
-	if !ok {
-		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance target %q is not an `out` header parameter", ctx.source, as.Pos, as.Target)
-	}
-	if h != ctx.primary {
-		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance target %q is not the primary header %q", ctx.source, as.Pos, h.Name, ctx.primary.Name)
-	}
-	fields := make([]Field, len(h.Fields))
-	for i, f := range h.Fields {
-		fields[i] = Field{Name: f.Name, Bits: f.Bits}
-	}
-	bitOff, fieldBits, ok := BitOffsetIn(fields, as.FieldName)
-	if !ok {
-		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance references unknown field %q in header %q", ctx.source, as.Pos, as.FieldName, h.Name)
-	}
-	bitInByte := bitOff % 8
-	if bitInByte+fieldBits > 8 {
-		return AdvanceOp{}, fmt.Errorf("%s:%s: pkt.advance field %q crosses a byte boundary (bits [%d,%d) — only single-byte fields are supported)", ctx.source, as.Pos, as.FieldName, bitOff, bitOff+fieldBits)
-	}
-	scaleBytes, err := scaleBytesFromLog2(as, ctx)
-	if err != nil {
-		return AdvanceOp{}, err
-	}
-	lsbShift := 8 - bitInByte - fieldBits
-	mask := ((1 << fieldBits) - 1) << lsbShift
-	return AdvanceOp{
-		Kind:      AdvanceOpField,
-		Target:    as.Target,
-		FieldName: as.FieldName,
-		Skip: &HeaderLength{
-			LenByteOff: bitOff / 8,
-			LenMask:    mask,
-			LenShift:   lsbShift,
-			Scale:      scaleBytes,
-			Base:       as.BaseWords * scaleBytes,
-		},
-		Pos: as.Pos,
-	}, nil
 }
 
 // buildAdvanceLookahead handles
@@ -744,6 +826,11 @@ func buildSelect(sel *p4lite.Select, ctx *buildCtx) (*SelectOp, error) {
 				return nil, fmt.Errorf("%s:%s: `pkt.lookahead<bit<%d>>()` select keys must be exactly 8 bits; for wider peeks, slice the value inside a pkt.advance arg or extract a header first", ctx.source, k.Pos, k.Bits)
 			}
 			keys[i] = SelectKey{Kind: SelectKeyLookahead, Bits: k.Bits, Pos: k.Pos}
+		case p4lite.SelectKeyCounterIsZero:
+			if !ctx.hasCounter(k.Counter) {
+				return nil, fmt.Errorf("%s:%s: select key references undeclared counter %q", ctx.source, k.Pos, k.Counter)
+			}
+			keys[i] = SelectKey{Kind: SelectKeyCounterIsZero, Counter: k.Counter, Pos: k.Pos}
 		default:
 			return nil, fmt.Errorf("%s:%s: unknown SelectKey kind %d", ctx.source, k.Pos, k.Kind)
 		}
@@ -769,7 +856,7 @@ func buildSelect(sel *p4lite.Select, ctx *buildCtx) (*SelectOp, error) {
 		}
 		vals := make([]MatchVal, len(c.Values))
 		for i, m := range c.Values {
-			vals[i] = MatchVal{IsWildcard: m.IsWildcard, Value: m.Value}
+			vals[i] = MatchVal{IsWildcard: m.IsWildcard, IsBool: m.IsBool, Bool: m.Bool, Value: m.Value}
 		}
 		out.Cases = append(out.Cases, SelectCase{Values: vals, Target: target, Pos: c.Pos})
 	}
@@ -842,10 +929,15 @@ func resolveFieldRef(keyPath string, ctx *buildCtx, pos p4lite.Position) (FieldR
 // indirect (multi-state) self-loop suitable for the TLV-walk codegen
 // path. The shape is:
 //
-//   - The entry state has no extracts and no advances. Its body is
-//     just the dispatch.
-//   - Its transition is a single-key select with key shape
-//     pkt.lookahead<bit<8>>() — the kind-byte dispatch.
+//   - The entry state has no extracts, advances, or counter ops.
+//     Its body is just the dispatch.
+//   - Its transition is a select with one of three legal key shapes
+//     (see isMultiStateLoopKeyShape): single `pkt.lookahead<bit<8>>()`
+//     (kind-byte TLV dispatch), single `<counter>.is_zero()`
+//     (counter-driven termination), or the 2-key tuple
+//     `(<counter>.is_zero(), pkt.lookahead<bit<8>>())` (counter
+//     termination + per-iter kind dispatch — the canonical TNA form
+//     for byte-bounded TLV walks like IPv4 options).
 //   - Every case (including default) targets either accept/reject
 //     OR a "sibling" state whose only transition is a TransDirect
 //     back to the entry. Sibling bodies inline into the callback.
@@ -859,14 +951,14 @@ func IsMultiStateLoopEntry(states []*ParseState, idx int) bool {
 		return false
 	}
 	s := states[idx]
-	if len(s.Extracts) != 0 || len(s.Advances) != 0 {
+	if len(s.Extracts) != 0 || len(s.Advances) != 0 || len(s.Counters) != 0 {
 		return false
 	}
 	if s.Trans.Kind != TransSelect || s.Trans.Select == nil {
 		return false
 	}
 	sel := s.Trans.Select
-	if len(sel.Keys) != 1 || sel.Keys[0].Kind != SelectKeyLookahead || sel.Keys[0].Bits != 8 {
+	if !isMultiStateLoopKeyShape(sel) {
 		return false
 	}
 	check := func(target int) bool {
@@ -888,6 +980,45 @@ func IsMultiStateLoopEntry(states []*ParseState, idx int) bool {
 		}
 	}
 	return true
+}
+
+// isMultiStateLoopKeyShape pins the legal key tuples for a multi-state
+// loop entry: one of {Lookahead8}, {CounterIsZero},
+// or {CounterIsZero, Lookahead8} in that order. Foreign shapes
+// (lookahead width != 8, reversed tuple, more than 2 keys) reject so
+// the multi-state codegen invariants stay narrow.
+func isMultiStateLoopKeyShape(sel *SelectOp) bool {
+	switch len(sel.Keys) {
+	case 1:
+		switch sel.Keys[0].Kind {
+		case SelectKeyLookahead:
+			return sel.Keys[0].Bits == 8
+		case SelectKeyCounterIsZero:
+			return true
+		}
+	case 2:
+		return sel.Keys[0].Kind == SelectKeyCounterIsZero &&
+			sel.Keys[1].Kind == SelectKeyLookahead &&
+			sel.Keys[1].Bits == 8
+	}
+	return false
+}
+
+// multiStateLoopKindKeyIndex returns the position of the lookahead
+// kind-byte key within the entry's select tuple, or -1 when the entry
+// is counter-only (no kind byte to dispatch on). Callers use this to
+// address into a SelectCase's Values for the kind value regardless of
+// whether the entry uses the 1-key or 2-key shape.
+func multiStateLoopKindKeyIndex(sel *SelectOp) int {
+	if sel == nil {
+		return -1
+	}
+	for i, k := range sel.Keys {
+		if k.Kind == SelectKeyLookahead {
+			return i
+		}
+	}
+	return -1
 }
 
 // IsMultiStateLoopSibling reports whether `idx` is a sibling state
@@ -921,12 +1052,15 @@ func IsMultiStateLoopSibling(states []*ParseState, idx int) bool {
 // dispatchKindForSibling looks up the kind value the multi-state
 // loop entry's transition select uses to dispatch to sibling state
 // `siblingIdx`. Returns (0, false) when the sibling is the default
-// target (no case label) or when no case targets it (defensive: the
-// caller already gated on IsMultiStateLoopSibling).
+// target, when no case targets it, or when the matching case's kind
+// slot is wildcard (catch-all branches like `(false, _)` in the
+// 2-key counter+lookahead shape don't pin a specific kind).
 //
 // Drives AuxLayout.DynamicKindByte so codegen's demand-driven slot
 // store prelude can match the kind byte against the queried option
-// without re-deriving the cascade structure.
+// without re-deriving the cascade structure. Counter-only entries
+// (no lookahead key) return false — they have no kind byte to
+// record.
 func dispatchKindForSibling(states []*ParseState, siblingIdx int) (uint64, bool) {
 	if siblingIdx < 0 || siblingIdx >= len(states) {
 		return 0, false
@@ -943,17 +1077,18 @@ func dispatchKindForSibling(states []*ParseState, siblingIdx int) (uint64, bool)
 	if entry.Trans.Kind != TransSelect || entry.Trans.Select == nil {
 		return 0, false
 	}
+	kindIdx := multiStateLoopKindKeyIndex(entry.Trans.Select)
+	if kindIdx < 0 {
+		return 0, false
+	}
 	for _, c := range entry.Trans.Select.Cases {
 		if c.Target != siblingIdx {
 			continue
 		}
-		// MVP: a sibling case has exactly one key value (the
-		// lookahead<bit<8>>() byte) — the multi-state shape check
-		// already validated single-key dispatch.
-		if len(c.Values) != 1 || c.Values[0].IsWildcard {
+		if kindIdx >= len(c.Values) || c.Values[kindIdx].IsWildcard {
 			return 0, false
 		}
-		return c.Values[0].Value, true
+		return c.Values[kindIdx].Value, true
 	}
 	return 0, false
 }

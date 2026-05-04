@@ -302,7 +302,7 @@ const bit<16> IPV4_VLAN_ETHERTYPE = 0x0800;
 
 ```p4
 // ipv4.p4: parser block が version=4 を自己検証する
-parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
+parser IPv4Parser(packet_in pkt, out ipv4_h hdr) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version) {
@@ -350,7 +350,7 @@ chain 中、SELF の `s` field が `1` のとき chain を終了。MPLS の bott
 #### Parser 宣言 (シンタックスチェックのみ)
 
 ```p4
-parser MplsFragment(packet_in pkt, out mpls_h hdr) {
+parser MplsParser(packet_in pkt, out mpls_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;
@@ -397,7 +397,7 @@ header foo_h {
 // foo は UDP の dport==4444 で識別
 const bit<16> FOO_UDP_DPORT = 4444;
 
-parser FooFragment(packet_in pkt, out foo_h hdr) {
+parser FooParser(packet_in pkt, out foo_h hdr) {
     state start {
         pkt.extract(hdr);
         transition accept;
@@ -704,8 +704,8 @@ eth/ipv6/tcp where any(ipv6.exts.next_header == 44)              ; Fragment ext 
 eth/ipv6/srv6/tcp where srv6.segments[0].addr == fc00::1         ; final dest
 eth/ipv6/srv6/tcp where srv6.segments[srv6.last_entry].addr == X ; first hop
 eth/ipv6/srv6/tcp where any(srv6.segments.addr == fc00::1)       ; ∃
-eth/ipv4/tcp where tcp.mss.value == 1460                         ; TCP option (固定 size)
-eth/ipv4/tcp where tcp.ts.val > 1000000
+eth/ipv4/tcp where tcp.options.MSS.value == 1460                 ; TCP option (固定 size)
+eth/ipv4/tcp where tcp.options.TS.tsval > 1000000
 
 ; パターン D: wrapper + 条件付き単発
 eth/ipv4/udp/gtp/ipv4/tcp where gtp.opt.exists
@@ -745,9 +745,9 @@ GTP の opt も同じ: GTP header の E/S/PN flag で有無が決まる、独立
 
 の 2 つに整理され、wire 構造との対応が一目瞭然になる。
 
-### 6.5 vocab declaration mechanism (7 種)
+### 6.5 vocab declaration mechanism (8 種)
 
-§6.1 の wire パターン (A/B/C/D) に対し、vocab 著者が使える declaration mechanism は 7 種類ある。**1 つの protocol が複数 mechanism を併用する**ことも普通 (TCP は HDRLEN_* で trailer を確保しつつ、その中身は TLV options walk 経路で読む、など)。
+§6.1 の wire パターン (A/B/C/D) に対し、vocab 著者が使える declaration mechanism は 8 種類ある。**1 つの protocol が複数 mechanism を併用する**ことも普通 (TCP は HDRLEN_* で trailer を確保しつつ、その中身は TLV options walk 経路で読む、など)。
 
 | # | mechanism | declare 方法 | 対応 wire パターン | 例 protocol | codegen 入口 |
 |---|---|---|---|---|---|
@@ -758,6 +758,7 @@ GTP の opt も同じ: GTP header の E/S/PN flag で有無が決まる、独立
 | **5** | **gated single aux** | `out h_t name` + transition select で gating | D: 条件付き単発 | GTP opt (E/S/PN flag gated) | `parser_machine.go` state graph |
 | **6** | **flag-triggered optional fields** | `<SELF>_OPT_FLAGS_BYTE_OFFSET` + `<SELF>_OPT_TRIGGER_<NAME>` + `<SELF>_OPT_LEN_<NAME>` | D の集合体 (flag 群が固定 size optional を gating) | GRE (C/K/S → checksum/key/seq) | `parser_machine.go::emitOptFlags*` |
 | **7** | **TLV options walk** | parser block multi-state self-loop (`parse_options → parse_<name> → parse_options`) + per-option aux header (`tcp_opt_<name>_h`) | C の TLV variant | TCP options (MSS/WS/SACK_PERM/TS) | `parser_machine.go::emitMultiStateSelfLoop` (lifted slot-store prelude) + `where.go::genDynamicOffsetAuxLoad` |
+| **8** | **ParserCounter trailer walk** | `extern ParserCounter { ... }` + `ParserCounter() pc;` + `pc.set(...)` / `pc.decrement(N)` + 1-key `select(pc.is_zero())` または 2-key `select(pc.is_zero(), pkt.lookahead<bit<8>>())` (TNA canonical) | byte-bounded walk (mechanism 1 の per-byte 版、mechanism 7 の terminator 兼用版) | (合成 IPv4 で dsltest 経由検証、bundled 採用は B-2 で予定) | `parser_counter.go` + `parser_machine.go::emitMultiState{Counter,CounterKind}Dispatch` |
 
 ユーザーが「可変長」と認識しがちな代表例 4 つの内訳:
 
@@ -778,7 +779,7 @@ primary header の **末尾に長さ可変の trailer** が付く形。長さは
 
 ```p4
 // ipv4.p4
-parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
+parser IPv4Parser(packet_in pkt, out ipv4_h hdr) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version) {
@@ -815,7 +816,7 @@ parser block の state が自己 transition で次 ext header に進む形。各
 
 ```p4
 // ipv6.p4 (抜粋)
-parser IPv6Fragment(packet_in pkt, out ipv6_h hdr, out ipv6_ext_h[8] exts) {
+parser IPv6Parser(packet_in pkt, out ipv6_h hdr, out ipv6_ext_h[8] exts) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.next_header) {
@@ -842,7 +843,7 @@ DSL では `any(ipv6.exts.next_header == 44)` で fragment 拡張ヘッダの存
 header gtp_h     { bit<3> version; ... bit<1> e; bit<1> s; bit<1> pn; ... }
 header gtp_opt_h { bit<16> seq; bit<8> npdu; bit<8> next_ext; }
 
-parser GtpFragment(packet_in pkt,
+parser GtpParser(packet_in pkt,
                    out gtp_h     gtp,
                    out gtp_opt_h opt) {
     state start {
@@ -870,7 +871,7 @@ P4 の header stack `H[N]` を使う:
 header srv6_h     { bit<8> next_header; ... bit<8> last_entry; ... }
 header srv6_seg_h { bit<128> addr; }
 
-parser SRv6Fragment(packet_in pkt,
+parser SRv6Parser(packet_in pkt,
                     out srv6_h        hdr,
                     out srv6_seg_h[8] segments) {
     state start {
@@ -902,11 +903,11 @@ header tcp_h               { ... bit<4> data_offset; ... }
 header tcp_opt_mss_h       { bit<8> kind; bit<8> length; bit<16> value; }
 header tcp_opt_ws_h        { bit<8> kind; bit<8> length; bit<8>  shift; }
 header tcp_opt_sack_perm_h { bit<8> kind; bit<8> length; }
-header tcp_opt_ts_h        { bit<8> kind; bit<8> length; bit<32> val; bit<32> ecr; }
+header tcp_opt_ts_h        { bit<8> kind; bit<8> length; bit<32> tsval; bit<32> tsecr; }
 
 const bit<8> TCP_PARSER_MAX_DEPTH = 32;
 
-parser TcpFragment(packet_in pkt,
+parser TcpParser(packet_in pkt,
                    out tcp_h               hdr,
                    out tcp_opt_mss_h       mss,
                    out tcp_opt_ws_h        ws,
@@ -991,14 +992,82 @@ mechanism 5 (gated single aux) との違い:
 - **5 (gated aux)** は **aux header として field が見える** (`gtp.opt.next_ext` で値読みできる)
 - **6 (flag-triggered)** は **trailer 領域確保のみ** で、optional field の **値は読めない** (現状)。GRE の checksum/key/sequence は「存在を検出して下流 ipv4/ipv6 への dispatch を正しく動かす」目的で十分だから
 
+#### Mechanism 8: ParserCounter trailer walk (Tofino TNA 互換)
+
+mechanism 1 (pkt.advance trailer) と mechanism 7 (TLV walk) の両方には R4 alignment 上の限界がある:
+
+- **mechanism 1**: trailer を 1 回の bulk advance で skip する。中身を per-element に extract できない (= TCP options 各 kind の位置を記録できない)
+- **mechanism 7**: kind dispatch で walk するが EOL kind が `accept` で R4 が trailer 中位置で停止する。TCP は terminal なので無害だが、`tcp/<inner>` chain や IPv4 options walk のように R4 を trailer 末尾まで進めたい場合は align しない
+
+**ParserCounter** (Tofino TNA / P4-16 PSA の標準 extern) は「残り byte 数を per-iter で減らし、0 に達したら walk 終了」という counter-driven 終端を表現する:
+
+```p4
+// 合成 IPv4 vocab (実物は pkg/kunai/dsltest/parser_counter_test.go)
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+const bit<8> IPV4_MAX_DEPTH = 11;     // 40-byte trailer / 4 bytes per iter + 1
+
+parser IPv4Parser(packet_in pkt, out ipv4_h hdr) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(hdr);
+        pc.set(((bit<8>)(hdr.ihl - 5)) << 5);   // bytes = (ihl - 5) × 4
+        transition select(hdr.version, hdr.ihl) {
+            (4, 5):  accept;       // IHL=5 fast path: trailer 0 bytes
+            (4, _):  walk;
+            default: reject;
+        }
+    }
+    state walk {
+        transition select(pc.is_zero()) {
+            true:  accept;
+            false: consume;
+        }
+    }
+    state consume {
+        pkt.advance(32);             // 4 bytes (IPv4 option word)
+        pc.decrement(4);
+        transition walk;
+    }
+}
+```
+
+**設計判断**:
+
+- **counter unit = byte**: BPF-native (Tofino の 32-bit word 単位とは異なる)。`pc.set` の引数は byte count (`pc.set(((bit<8>)(hdr.ihl - 5)) << 5)` で `(ihl-5) × 4 byte`)、`pc.decrement(N)` の N も byte
+- **slot 確保**: per-machine reused (=「machine の生存期間中だけ意味を持つ」)。`pkg/kunai/codegen/parser_counter.go` が bpf_loop ctx と where-layer slot の間の gap 領域に最大 2 slot 配置する。layer 跨ぎで再利用される
+- **api compat**: `extern ParserCounter { ... }` 宣言は p4lite が opaque-skip するので Tofino spec の method signature をそのまま書ける。`make p4c-check` (= upstream p4test --parse-only) も通る
+- **multi-state loop entry の認識**: `vocab.IsMultiStateLoopEntry` が 3 種の key 形を受理する: 単 `SelectKeyLookahead{Bits=8}` (mechanism 7、kind-byte dispatch のみ)、単 `SelectKeyCounterIsZero` (counter 終端のみ)、2-key tuple `(SelectKeyCounterIsZero, SelectKeyLookahead{Bits=8})` (counter 終端 + per-iter kind dispatch、TNA canonical 形)。tuple は順序固定で reverse は `validateStateGraph` が "no lowering for" で reject。codegen `emitMultiStateDispatch` がそれぞれ `emitMultiStateCounterDispatch` (1-key)、`emitMultiStateCounterKindDispatch` (2-key)、kind-only cascade に dispatch する
+
+**Codegen 経路**:
+
+1. **Slot init**: machine entry で全 declared counter slot を 0 で初期化 (`emitCounterSlotInit`、`emitFillStackSlots` 経由)。BPF verifier の "uninitialized stack read" を回避
+2. **`pc.set(...)`**: AdvanceField と同じ `lowerCastShiftSkip` 経由で `((header_byte & mask) >> shift) * scale - base` を scratchA に計算、StoreMem で slot へ
+3. **`pc.decrement(N)`**: `LoadMem slot → R5; Sub.Imm R5, N; StoreMem slot, R5` の 3 insn (BPF は memory-form arith を持たないので最小)
+4. **`pc.is_zero()` select**: `LoadMem slot → R3; JEq.Imm R3, 0, trueLabel` の probe + 2-arm 分岐。2-key tuple `(pc.is_zero(), pkt.lookahead<bit<8>>())` 形では、probe で counter==0 を `trueLandingLabel` に分岐させた後、kind byte を load して `(false, K)` cases の cascade (per-case JNE → sibling body → skip landing)、最後に `(false, _)` または `sel.Default` をフォールスルー、tail に `trueLandingLabel` を置いて `(true, _)` body を emit。kind-byte の load 位置 (R4+R3) は 1-key 形と同一なので `emitMultiStateCallback` の prelude (slot-store cascade) は変更不要
+
+**mechanism 1 / 7 と相補的な点**:
+
+| 軸 | 1 (advance trailer) | 7 (TLV walk) | 8 (ParserCounter) |
+|---|---|---|---|
+| trailer end alignment | ◎ (bulk advance) | × (EOL で中位置停止) | ◎ (counter exhaustion で末尾) |
+| per-element extract | × (bulk skip のみ) | ◎ (kind ごと aux) | △ (counter walk 自体は extract なし、7 と併用) |
+
+production vocab は mechanism 1 / 7 のままで、E2E 検証は `pkg/kunai/dsltest/parser_counter_test.go` の合成 IPv4 vocab を使う (IHL=5 fast path、IHL=6/7 (1-2 iter)、IHL=15 (10 iter = `IPV4_MAX_DEPTH = 11`))。bundled 移行のスコープ・動機は `dsl-followups.md` B-2 / B-5 を参照。
+
 ### 6.6 DSL access の体系
 
 aux への access は **dot path で統一**。chain element も同じ accessor を共有する:
 
 | 操作 | 構文 | 適用例 |
 |---|---|---|
-| 単発 aux のフィールド | `<proto>.<aux>.<field>` | `gtp.opt.next_ext == 0`, `tcp.mss.value == 1460` |
-| 単発 aux の存在 | `<proto>.<aux>.exists` | `gtp.opt.exists`, `tcp.sack_perm.exists` |
+| 単発 aux のフィールド | `<proto>.<aux>.<field>` | `gtp.opt.next_ext == 0`, `tcp.options.MSS.value == 1460` |
+| 単発 aux の存在 | `<proto>.<aux>.exists` | `gtp.opt.exists`, `tcp.options.SACK_PERM.exists` |
 | stack/chain の index | `<proto>.<aux>[N].<field>` | `srv6.segments[0].addr == fc00::1` |
 | stack/chain の動的 index | `<proto>.<aux>[<expr>].<field>` | `srv6.segments[srv6.last_entry].addr` |
 | 集合 ∃ | `any(<expr>)` | `any(srv6.segments.addr == X)`, `any(vlan.id == 100)` |

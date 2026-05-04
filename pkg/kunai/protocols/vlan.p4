@@ -13,3 +13,10 @@ const bit<16> VLAN_QINQ_ETHERTYPE = 0x8100;
 // ethertype being 0x8100. Required by chain codegen for `vlan{n,m}`
 // / `vlan+`.
 const bit<16> VLAN_VLAN_ETHERTYPE = 0x8100;
+
+parser VlanParser(packet_in pkt, out vlan_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}

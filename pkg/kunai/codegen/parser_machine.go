@@ -207,6 +207,14 @@ func (c *pmCtx) emitState(stateIdx int) (asm.Instructions, asm.Instructions, err
 			return nil, nil, err
 		}
 		insns = append(insns, dynInit...)
+		// Zero each declared ParserCounter slot. Counters are
+		// machine-local; the slot must hold a known value before any
+		// is_zero() reaches it so the verifier accepts the load.
+		ctrInit, err := c.emitCounterSlotInit()
+		if err != nil {
+			return nil, nil, err
+		}
+		insns = append(insns, ctrInit...)
 	} else {
 		insns = append(insns, landingNoop(c.stateLabel(stateIdx)))
 	}
@@ -245,8 +253,16 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 		return c.emitMultiStateSelfLoop(state, stateIdx)
 	}
 
+	if (len(state.Advances) > 0 || len(state.Counters) > 0) && state.OffsetAtEntry < 0 {
+		return nil, nil, fmt.Errorf("%w: state %q has dynamic R4 on entry; pkt.advance and counter ops require a static layer-entry offset", ErrNotImplemented, state.Name)
+	}
+
 	var insns asm.Instructions
 	stashAddr := inlineSelectAddr
+	// Running byte distance from layer-entry to R4. Updated as each
+	// extract emits its post-bounds Add.Imm; the Counters block reads
+	// the post-extract value to anchor primary-header byte loads.
+	fixedHs := state.OffsetAtEntry
 	for i, ex := range state.Extracts {
 		exInsns, err := c.emitExtract(ex)
 		if err != nil {
@@ -262,6 +278,7 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 		}
 		hs := ex.HeaderSize / 8
 		insns = append(insns, emitAdvance(hs))
+		fixedHs += hs
 		if vt, ok := knownVariableTails[ex.HeaderName]; ok {
 			if state.Trans.Kind == vocab.TransSelect {
 				// Inline ABI: R0/R1 are scratch_start/end, R4 is the
@@ -300,11 +317,10 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 	// variants the loader has already lowered. Field and Lookahead
 	// templates share the variableTailSkip path; they differ only in
 	// the "bytes already advanced" arg (state.OffsetAtEntry vs 0).
-	// Literal templates are a fixed bounds-checked Add.Imm.
+	// Literal templates are a fixed bounds-checked Add.Imm. Advances
+	// are mutually exclusive with Extracts (loader-enforced), so
+	// fixedHs is still equal to state.OffsetAtEntry here.
 	for _, adv := range state.Advances {
-		if state.OffsetAtEntry < 0 {
-			return nil, nil, fmt.Errorf("%w: state %q has dynamic R4 on entry; pkt.advance requires a static layer-entry offset", ErrNotImplemented, state.Name)
-		}
 		switch adv.Kind {
 		case vocab.AdvanceOpField:
 			vt := variableTailSkipFromHeaderLength(adv.Skip)
@@ -330,6 +346,18 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 		default:
 			return nil, nil, fmt.Errorf("%w: unknown AdvanceOp kind %d", ErrNotImplemented, adv.Kind)
 		}
+	}
+
+	// Counter ops live after Extracts/Advances. fixedHs (running) is
+	// the byte distance from layer-entry to R4 — counter set loads
+	// the count from a primary-header byte at `R4 - fixedHs +
+	// LenByteOff`.
+	for _, op := range state.Counters {
+		body, err := c.emitCounterOp(op, fixedHs, inlineCounterEnv(), dslReject)
+		if err != nil {
+			return nil, nil, err
+		}
+		insns = append(insns, body...)
 	}
 
 	// Only the inline non-stash path reads R4 live; stash mode pre-
@@ -645,9 +673,35 @@ func (c *pmCtx) emitTransitionWithSelfRewrite(t vocab.TransitionOp, fromState in
 	case vocab.TransDirect:
 		return asm.Instructions{asm.Ja.Label(c.targetLabel(t.Target, fromState, selfLabel))}, nil
 	case vocab.TransSelect:
+		if isCounterIsZeroSelect(t.Select) {
+			return c.emitCounterIsZeroSelect(t.Select, func(target int) string {
+				return c.targetLabel(target, fromState, selfLabel)
+			}, inlineCounterEnv())
+		}
 		return c.emitSelectWithAddr(t.Select, fromState, selfLabel, addr)
 	}
 	return nil, fmt.Errorf("%w: parser-machine transition kind %d", ErrNotImplemented, t.Kind)
+}
+
+// isCounterIsZeroSelect reports whether a SelectOp's keys are a
+// single `<counter>.is_zero()` peek — the shape that needs the
+// counter-dispatch emit instead of the byte-keyed cascade.
+func isCounterIsZeroSelect(sel *vocab.SelectOp) bool {
+	if sel == nil || len(sel.Keys) != 1 {
+		return false
+	}
+	return sel.Keys[0].Kind == vocab.SelectKeyCounterIsZero
+}
+
+// emitCounterIsZeroSelect emits a 2-arm branch on the counter slot.
+// The branch helper is the same one emitSelectGeneric uses, so call-
+// site (inline / callback) decides where each target lands.
+func (c *pmCtx) emitCounterIsZeroSelect(sel *vocab.SelectOp, branch func(int) string, env counterEnv) (asm.Instructions, error) {
+	trueLabel, falseLabel, err := counterIsZeroLabels(sel, branch)
+	if err != nil {
+		return nil, err
+	}
+	return c.emitCounterIsZeroBranches(sel.Keys[0].Counter, trueLabel, falseLabel, env)
 }
 
 // targetLabel maps a transition target index (state idx, accept/reject
@@ -1062,12 +1116,23 @@ func (c *pmCtx) emitMultiStateSelfLoop(state *vocab.ParseState, stateIdx int) (a
 // when no where / capture clause queries this layer's options.
 func (c *pmCtx) emitDynamicAuxSentinelInit() (asm.Instructions, error) {
 	demand := c.queried[c.layer]
-	if len(demand) == 0 {
+	return emitFillStackSlots(dynamicAuxSentinel, len(demand), func(i int) (int16, error) {
+		return dynamicAuxOffsetSlot(c.layer.LayerPos, i+1)
+	})
+}
+
+// emitFillStackSlots writes initImm into n stack slots resolved by
+// the supplied indexer. Used by sentinel-init paths (dynamic aux
+// slots, parser counter slots) where the same Mov+Store cascade
+// keeps the per-machine setup tight. Returns nil instructions when
+// n == 0 so callers can splat the result unconditionally.
+func emitFillStackSlots(initImm int32, n int, resolve func(int) (int16, error)) (asm.Instructions, error) {
+	if n == 0 {
 		return nil, nil
 	}
-	insns := asm.Instructions{asm.Mov.Imm(asm.R3, dynamicAuxSentinel)}
-	for idx := range demand {
-		slot, err := dynamicAuxOffsetSlot(c.layer.LayerPos, idx+1)
+	insns := asm.Instructions{asm.Mov.Imm(asm.R3, initImm)}
+	for i := range n {
+		slot, err := resolve(i)
 		if err != nil {
 			return nil, err
 		}
@@ -1176,9 +1241,18 @@ func (c *pmCtx) emitMultiStateCallback(entry *vocab.ParseState, entryIdx int, cb
 // emitMultiStateDispatch builds the per-case cascade for the entry's
 // transition select. Each case either inlines its sibling's body
 // (followed by Ja continueLabel) or jumps to breakLabel for
-// accept / reject targets.
+// accept / reject targets. Three legal entry shapes (validated by
+// vocab.IsMultiStateLoopEntry): counter-only, lookahead-only, or
+// the 2-key (counter, lookahead) tuple — each routes here through
+// the matching helper.
 func (c *pmCtx) emitMultiStateDispatch(entry *vocab.ParseState, entryIdx int, addr selectAddr, breakLabel, continueLabel string) (asm.Instructions, error) {
 	sel := entry.Trans.Select
+	if hasCounterAndKindKeys(sel) {
+		return c.emitMultiStateCounterKindDispatch(entry, entryIdx, addr, breakLabel, continueLabel)
+	}
+	if isCounterIsZeroSelect(sel) {
+		return c.emitMultiStateCounterDispatch(entry, entryIdx, breakLabel, continueLabel)
+	}
 	// Single key, single byte (validated by vocab.IsMultiStateLoopEntry).
 	shape, err := c.resolveSelectKey(sel.Keys[0])
 	if err != nil {
@@ -1208,6 +1282,149 @@ func (c *pmCtx) emitMultiStateDispatch(entry *vocab.ParseState, entryIdx int, ad
 	}
 	insns = append(insns, body...)
 	return insns, nil
+}
+
+// hasCounterAndKindKeys reports whether sel uses the canonical TNA
+// 2-key tuple `(<counter>.is_zero(), pkt.lookahead<bit<8>>())` —
+// the byte-bounded TLV walk shape (IPv4 options being the prime
+// example). vocab.IsMultiStateLoopEntry has already validated that
+// the keys appear in this exact order when both are present.
+func hasCounterAndKindKeys(sel *vocab.SelectOp) bool {
+	return sel != nil && len(sel.Keys) == 2 &&
+		sel.Keys[0].Kind == vocab.SelectKeyCounterIsZero &&
+		sel.Keys[1].Kind == vocab.SelectKeyLookahead
+}
+
+// emitMultiStateCounterKindDispatch lowers the 2-key (counter,
+// lookahead) tuple. Probe the counter first (zero → branch to the
+// `(true, _)` body); otherwise cascade over the `(false, K)` cases'
+// kind-byte JNE checks, falling back to the `(false, _)` arm or
+// the explicit default. The counter-true body lives at the tail
+// behind a landing label so the false-arm fall-through doesn't reach
+// it accidentally.
+func (c *pmCtx) emitMultiStateCounterKindDispatch(entry *vocab.ParseState, entryIdx int, addr selectAddr, breakLabel, continueLabel string) (asm.Instructions, error) {
+	sel := entry.Trans.Select
+	const (
+		counterIdx = 0
+		kindIdx    = 1
+	)
+
+	counterTrueLabel := fmt.Sprintf("%s_ctr_true_%d", c.labelNS, c.selectCounter())
+	probe, err := c.emitCounterIsZeroProbe(sel.Keys[counterIdx].Counter, counterTrueLabel, callbackCounterEnv())
+	if err != nil {
+		return nil, err
+	}
+	kindShape, err := c.resolveSelectKey(sel.Keys[kindIdx])
+	if err != nil {
+		return nil, err
+	}
+
+	insns := append(asm.Instructions{}, probe...)
+
+	// Walk counter-false cases. Concrete kinds emit JNE; wildcard
+	// kind (`(false, _)`) holds the counter-false default target
+	// for the fall-through after the cascade. Counter-true cases
+	// are deferred to the tail body.
+	counterFalseDefaultTarget := sel.Default
+	for _, kase := range sel.Cases {
+		cv := kase.Values[counterIdx]
+		isCounterFalse := cv.IsWildcard || (cv.IsBool && !cv.Bool)
+		if !isCounterFalse {
+			continue
+		}
+		kv := kase.Values[kindIdx]
+		if kv.IsWildcard {
+			counterFalseDefaultTarget = kase.Target
+			continue
+		}
+		caseSkip := fmt.Sprintf("%s_%s_%d_skip", c.labelNS, addr.labelTag, c.selectCounter())
+		insns = append(insns, emitKeyCompare(addr, kindShape, kindIdx, kv.Value, caseSkip)...)
+		body, err := c.emitMultiStateCaseBody(kase.Target, entryIdx, breakLabel, continueLabel)
+		if err != nil {
+			return nil, err
+		}
+		insns = append(insns, body...)
+		insns = append(insns, landingNoop(caseSkip))
+	}
+	defaultBody, err := c.emitMultiStateCaseBody(counterFalseDefaultTarget, entryIdx, breakLabel, continueLabel)
+	if err != nil {
+		return nil, err
+	}
+	insns = append(insns, defaultBody...)
+
+	insns = append(insns, landingNoop(counterTrueLabel))
+	trueTarget := counterTrueTargetFor2Key(sel)
+	trueBody, err := c.emitMultiStateCaseBody(trueTarget, entryIdx, breakLabel, continueLabel)
+	if err != nil {
+		return nil, err
+	}
+	insns = append(insns, trueBody...)
+	return insns, nil
+}
+
+// counterTrueTargetFor2Key picks the counter-true target for a 2-key
+// dispatch. Looks for the first case whose counter slot is `true` or
+// wildcard; falls back to sel.Default. Mirrors the 1-key
+// counterIsZeroTrueTarget but indexes the counter slot at 0 of the
+// 2-key tuple.
+func counterTrueTargetFor2Key(sel *vocab.SelectOp) int {
+	for _, kase := range sel.Cases {
+		cv := kase.Values[0]
+		if cv.IsWildcard || (cv.IsBool && cv.Bool) {
+			return kase.Target
+		}
+	}
+	return sel.Default
+}
+
+// emitMultiStateCounterDispatch emits the dispatch for a counter-
+// driven multi-state loop. The entry's select has exactly two arms
+// (true / false on `<counter>.is_zero()`); probe the slot once, JEq
+// to a label that runs the true-arm body, then fall through into
+// the false-arm body. Each arm uses emitMultiStateCaseBody for
+// uniform sibling-vs-terminal handling.
+func (c *pmCtx) emitMultiStateCounterDispatch(entry *vocab.ParseState, entryIdx int, breakLabel, continueLabel string) (asm.Instructions, error) {
+	sel := entry.Trans.Select
+	trueLandingLabel := fmt.Sprintf("%s_ctr_true_%d", c.labelNS, c.selectCounter())
+	probe, err := c.emitCounterIsZeroProbe(sel.Keys[0].Counter, trueLandingLabel, callbackCounterEnv())
+	if err != nil {
+		return nil, err
+	}
+	falseBody, err := c.emitMultiStateCaseBody(counterIsZeroFalseTarget(sel), entryIdx, breakLabel, continueLabel)
+	if err != nil {
+		return nil, err
+	}
+	trueBody, err := c.emitMultiStateCaseBody(counterIsZeroTrueTarget(sel), entryIdx, breakLabel, continueLabel)
+	if err != nil {
+		return nil, err
+	}
+	insns := append(probe, falseBody...)
+	insns = append(insns, landingNoop(trueLandingLabel))
+	return append(insns, trueBody...), nil
+}
+
+// counterIsZeroTrueTarget / counterIsZeroFalseTarget pick the
+// dispatch target for the matching boolean arm, falling back to the
+// default when no explicit case matches. The vocab loader has
+// already validated that the select has two-arm shape.
+func counterIsZeroTrueTarget(sel *vocab.SelectOp) int {
+	for _, kase := range sel.Cases {
+		mv := kase.Values[0]
+		if (mv.IsBool && mv.Bool) || mv.IsWildcard {
+			return kase.Target
+		}
+	}
+	return sel.Default
+}
+
+func counterIsZeroFalseTarget(sel *vocab.SelectOp) int {
+	for _, kase := range sel.Cases {
+		mv := kase.Values[0]
+		if (mv.IsBool && !mv.Bool) || mv.IsWildcard {
+			return kase.Target
+		}
+	}
+	return sel.Default
 }
 
 // emitMultiStateCaseBody emits the action a single dispatch arm
@@ -1268,6 +1485,22 @@ func (c *pmCtx) emitSiblingCallbackBody(sib *vocab.ParseState, breakLabel string
 		default:
 			return nil, fmt.Errorf("%w: multi-state callback sibling advance kind %d not yet supported", ErrNotImplemented, adv.Kind)
 		}
+	}
+	for _, op := range sib.Counters {
+		// CounterOpSet reads a primary-header byte at fixedHs-relative
+		// offset; sibling iterations run with R3 anchored at the
+		// per-iter cursor, not at primary-end, so a set here would
+		// silently mis-anchor the load. The MVP rejects it loudly so
+		// future migrations have to put pc.set in the start (or pre-
+		// loop) state where the anchor is well-defined.
+		if op.Kind == vocab.CounterOpSet {
+			return nil, fmt.Errorf("%w: counter set inside multi-state self-loop sibling %q is not supported (declare it in the loop's pre-entry state)", ErrNotImplemented, sib.Name)
+		}
+		body, err := c.emitCounterOp(op, 0, callbackCounterEnv(), breakLabel)
+		if err != nil {
+			return nil, err
+		}
+		insns = append(insns, body...)
 	}
 	return insns, nil
 }
@@ -1368,6 +1601,14 @@ func (c *pmCtx) emitCallbackTransition(t vocab.TransitionOp, fromState int, brea
 		}
 		return asm.Instructions{asm.Ja.Label(breakLabel)}, nil
 	case vocab.TransSelect:
+		if isCounterIsZeroSelect(t.Select) {
+			return c.emitCounterIsZeroSelect(t.Select, func(target int) string {
+				if target == fromState {
+					return continueLabel
+				}
+				return breakLabel
+			}, callbackCounterEnv())
+		}
 		return c.emitCallbackSelect(t.Select, fromState, breakLabel, continueLabel, addr)
 	}
 	return nil, fmt.Errorf("%w: parser-machine callback transition kind %d", ErrNotImplemented, t.Kind)

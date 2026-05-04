@@ -137,7 +137,7 @@ const bit<8> IPV4_HDRLEN_BASE        = 20;
 
 // 自己検証 — 親に Field dispatch がない場合 (MPLS / GTP-U の下) でも、
 // version=4 を確認することで chain を許可
-parser IPv4Fragment(packet_in pkt, out ipv4_h hdr) {
+parser IPv4Parser(packet_in pkt, out ipv4_h hdr) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version) {
@@ -198,7 +198,7 @@ kunai は 3 つの戦略を併用している:
 `ipv6` の ext-header chain (HBH / Fragment / DestOpt が次々続く) や `srv6` の segment list (各 16 byte の IPv6 アドレスが N 個並ぶ) は、 **protocol 内部の可変長構造**。 これは chain quantifier (= 外側の繰り返し) ではなく、 protocol の `parser` block の state machine として表現する。
 
 ```p4
-parser IPv6Fragment(packet_in pkt, out ipv6_h hdr, out ipv6_ext_h[8] exts) {
+parser IPv6Parser(packet_in pkt, out ipv6_h hdr, out ipv6_ext_h[8] exts) {
     state start {
         pkt.extract(hdr);
         transition select(hdr.version, hdr.next_header) {

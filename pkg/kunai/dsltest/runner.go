@@ -20,6 +20,7 @@ import (
 
 	"github.com/takehaya/xdp-ninja/pkg/kunai"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/codegen"
+	"github.com/takehaya/xdp-ninja/pkg/kunai/vocab"
 )
 
 // skipIfNotRoot skips when the test is not running as root (the
@@ -56,16 +57,33 @@ type Runner struct {
 	expr       string
 }
 
-// New compiles dslExpr and loads the resulting filter into a
-// standalone XDP wrapper. Skips the test when not running as root
-// (BPF_PROG_TEST_RUN requires CAP_SYS_ADMIN). Verifier failures are
-// reported as t.Fatalf so the test surfaces the kernel's diagnostic
-// log, not a generic "load failed".
+// New compiles dslExpr against the bundled vocabulary and loads the
+// resulting filter into a standalone XDP wrapper. Skips the test
+// when not running as root (BPF_PROG_TEST_RUN requires CAP_SYS_ADMIN).
+// Verifier failures are reported as t.Fatalf so the test surfaces
+// the kernel's diagnostic log, not a generic "load failed".
 func New(t *testing.T, dslExpr string) *Runner {
+	t.Helper()
+	return newWithCompiler(t, dslExpr, func() (codegen.Output, error) {
+		return kunai.Compile(dslExpr, codegen.Capabilities{})
+	})
+}
+
+// NewWithVocab is New against a caller-supplied vocabulary map —
+// used by tests that exercise codegen on synthetic .p4 inputs
+// without having to add them to the bundled vocab.
+func NewWithVocab(t *testing.T, dslExpr string, v map[string]*vocab.ProtocolSpec) *Runner {
+	t.Helper()
+	return newWithCompiler(t, dslExpr, func() (codegen.Output, error) {
+		return kunai.CompileWithVocab(dslExpr, v, codegen.Capabilities{})
+	})
+}
+
+func newWithCompiler(t *testing.T, dslExpr string, compile func() (codegen.Output, error)) *Runner {
 	t.Helper()
 	skipIfNotRoot(t)
 
-	out, err := kunai.Compile(dslExpr, codegen.Capabilities{})
+	out, err := compile()
 	if err != nil {
 		t.Fatalf("kunai.Compile(%q): %v", dslExpr, err)
 	}
@@ -175,15 +193,23 @@ func buildXDPWrapper(filterOut codegen.Output, scratchFD int) asm.Instructions {
 		asm.StoreMem(asm.R10, stackScratch, asm.R0, asm.DWord),
 
 		// Compute capped copy length: min(pkt_len, scratchSize). The
-		// verifier rejects bpf_xdp_load_bytes with a zero-sized R4
-		// range, so an empty packet drops here before the helper call.
+		// verifier rejects bpf_xdp_load_bytes when R4's umin can be
+		// 0 (helper expects ARG_CONST_SIZE, not _OR_ZERO), so an
+		// empty packet drops here before the helper call. The
+		// `JLT R4, 1` after JLE clamping is the load-bearing umin
+		// pin: kernel 6.1 / 6.6 don't propagate umin ≥ 1 from the
+		// JEq R9, 0 above through `Mov R4, R9` + JLE clamp, but a
+		// JLT against a strict imm narrows the fall-through range
+		// to [1, ∞) directly. Newer kernels (6.12+) accept either
+		// form; the JLT is the cross-version-safe spelling.
 		asm.JEq.Imm(asm.R9, 0, "drop"),
 		asm.Mov.Reg(asm.R4, asm.R9),
 		asm.JLE.Imm(asm.R4, int32(scratchSize), "load_len_ok"),
 		asm.Mov.Imm(asm.R4, int32(scratchSize)),
 
 		// bpf_xdp_load_bytes(R6=ctx, R2=0, R3=scratch, R4=len).
-		asm.Mov.Reg(asm.R1, asm.R6).WithSymbol("load_len_ok"),
+		asm.JLT.Imm(asm.R4, 1, "drop").WithSymbol("load_len_ok"),
+		asm.Mov.Reg(asm.R1, asm.R6),
 		asm.Mov.Imm(asm.R2, 0),
 		asm.LoadMem(asm.R3, asm.R10, stackScratch, asm.DWord),
 		asm.FnXdpLoadBytes.Call(),

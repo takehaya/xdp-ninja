@@ -11,8 +11,12 @@ header mpls_h {
 
 // Dispatch from Ethernet via the MPLS unicast EtherType. The
 // multicast variant (0x8848) is intentionally omitted from the MVP.
+// MPLS rides under VLAN and QinQ with the same 0x8847 because the
+// EtherType identifies the *payload* protocol, independent of the
+// outer L2 carrier.
 const bit<16> MPLS_ETH_ETHERTYPE  = 0x8847;
 const bit<16> MPLS_VLAN_ETHERTYPE = 0x8847;
+const bit<16> MPLS_QINQ_ETHERTYPE = 0x8847;
 
 // Stacked MPLS labels: the next label sits immediately after the
 // previous one with no boundary marker. The user opts in by writing
@@ -29,3 +33,10 @@ const bit<8> MPLS_MAX_DEPTH = 8;
 // header field exactly (bit<1>); chain-end codegen handles the
 // sub-byte mask + shift.
 const bit<1> MPLS_CHAIN_END_S = 1;
+
+parser MplsParser(packet_in pkt, out mpls_h hdr) {
+    state start {
+        pkt.extract(hdr);
+        transition accept;
+    }
+}
