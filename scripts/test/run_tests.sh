@@ -186,6 +186,31 @@ test_dsl_capture_headers()       { run_pcap_test -i veth0 -c 3 "eth/ipv4/icmp ca
 # codegen against a known return value.
 test_dsl_exit_action() { run_count_test 3 -i veth0 --mode exit -c 3 "eth/ipv4/icmp where action == XDP_PASS"; }
 
+# tc_prog_id resolves the integration's dummy tc clsact classifier
+# program ID via bpftool — needed because tc-mode targeting is
+# program-ID-only (no interface-based clsact qdisc walk yet, see
+# F15 follow-up scope).
+tc_prog_id() {
+    bpftool prog show name tc_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':'
+}
+
+# Dummy tc clsact classifier returns TC_ACT_OK (=0); --mode tc-entry
+# and --mode tc-exit attach as fentry/fexit observers and capture
+# packets on each ingress event.
+test_dsl_tc_entry() {
+    require_bpftool || return 1
+    local pid_t=$(tc_prog_id)
+    [[ -n "$pid_t" ]] || { echo "tc_pass program not found" >&2; return 1; }
+    run_count_test 3 --mode tc-entry -p "$pid_t" -c 3 "eth/ipv4/icmp"
+}
+
+test_dsl_tc_exit_action() {
+    require_bpftool || return 1
+    local pid_t=$(tc_prog_id)
+    [[ -n "$pid_t" ]] || { echo "tc_pass program not found" >&2; return 1; }
+    run_count_test 3 --mode tc-exit -p "$pid_t" -c 3 "eth/ipv4/icmp where action == TC_ACT_OK"
+}
+
 test_graceful_shutdown() {
     require_bpftool || return 1
     local prog_id_before=$(bpftool prog show name xdp_pass 2>/dev/null | head -1 | awk '{print $1}' | tr -d ':')
@@ -229,6 +254,8 @@ run_test "dsl_entry_predicate"     test_dsl_entry_predicate_match
 run_test "dsl_entry_nomatch"       test_dsl_entry_filter_nomatch
 run_test "dsl_capture_headers"     test_dsl_capture_headers
 run_test "dsl_exit_action"         test_dsl_exit_action
+run_test "dsl_tc_entry"            test_dsl_tc_entry
+run_test "dsl_tc_exit_action"      test_dsl_tc_exit_action
 run_test "graceful_shutdown"       test_graceful_shutdown
 
 echo ""

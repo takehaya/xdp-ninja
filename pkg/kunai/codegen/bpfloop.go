@@ -243,6 +243,9 @@ func genBpfLoopCallback(spec *vocab.ProtocolSpec, selfConst *vocab.DispatchConst
 		asm.Mov.Imm(asm.R0, 1).WithSymbol(breakLabel), // break
 		asm.Return(),
 	)
+	if err := assertCallbackComplexity(insns, cbSym); err != nil {
+		return nil, err
+	}
 	return insns, nil
 }
 

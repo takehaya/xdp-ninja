@@ -508,6 +508,26 @@ func TestQinQLeaf(t *testing.T) {
 	r.MustMatch(t, Build(t, o), "eth+QinQ+ipv4+tcp")
 }
 
+// TestVXLANDispatch exercises the vxlan vocab: UDP dport 4789
+// dispatch + 8-byte VXLAN extract. Reject case pins that mismatched
+// UDP dport (e.g. dport=53 for DNS) refuses to dispatch into vxlan.
+// (24-bit VNI predicate is not yet supported by codegen — field size
+// 3 bytes is staged.)
+func TestVXLANDispatch(t *testing.T) {
+	r := New(t, "eth/ipv4/udp/vxlan")
+	r.MustMatch(t, BuildEthIPv4UDPVXLAN(t, 0x010203), "vxlan dispatch + extract")
+	r.MustReject(t, BuildEthIPv4UDP(t, 12345, 53, []byte("dns")), "non-vxlan UDP (dport=53) must reject vxlan filter")
+}
+
+// TestGeneveDispatch exercises the geneve vocab: UDP dport 6081 +
+// 8-byte fixed Geneve extract. Same shape as VXLAN with a richer
+// vocab (version, opt_len, flags, protocol_type, vni, reserved).
+func TestGeneveDispatch(t *testing.T) {
+	r := New(t, "eth/ipv4/udp/geneve")
+	r.MustMatch(t, BuildEthIPv4UDPGeneve(t, 0x040506), "geneve dispatch + extract")
+	r.MustReject(t, BuildEthIPv4UDP(t, 12345, 53, []byte("dns")), "non-geneve UDP (dport=53) must reject geneve filter")
+}
+
 // TestEthIPv4UDPDirect ensures the simple UDP path still works
 // alongside the GTP-over-UDP path. Important regression check
 // because both filters share the udp.p4 vocab.
