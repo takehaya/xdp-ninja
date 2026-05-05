@@ -40,7 +40,7 @@ xdp-ninja は **non-invasive な XDP 観測ツール**。BPF trampoline (fentry 
 | 判断 | 理由 |
 |---|---|
 | **薄い user-facing DSL + 厚い vocab** | プロトコル知識は再利用可能な `.p4` ファイルに切り出す |
-| **kernel 5.17+ (quantifier / parser self-loop あり) / さらに古くても可 (fixed chain)** | `bpf_loop` が必須。predicate は BPF_END で済むので BSWAP (6.6+) は不要 |
+| **kernel** | CI matrix で実測する範囲は 6.1 / 6.6 / 6.12 / 6.18。 `bpf_loop` を要する features (`+`/`*`/`{n,m>4}` chain quantifier、 parser machine self-loop) は kernel 5.17+ 導入なので 5.17〜6.0 でも理論上動くが CI 未実測。 fixed chain (`{1,4}` 以下、 self-loop 無し) は更に古い kernel でも動作可能。 predicate codegen は `BSWAP` (6.6+) を避け `BPF_END` byte-swap で済ませる |
 | **DSL がデフォルト、`--cbpf` opt-in** | DSL の surface が安定したので default 化、cbpfc パスは legacy fallback として残す (deprecation notice 付き) |
 | **baked-in vocab** | `//go:embed *.p4` で `.p4` ファイル群を binary に同梱、deploy 時に外部依存ゼロ |
 | **vocab は p4lite (P4-16 strict subset)** | p4c で parse 可能な範囲に留める (互換性は §5 参照) |
@@ -1107,7 +1107,7 @@ implementation 詳細は `pkg/kunai/codegen/parser_machine.go` の state graph e
 | Parser machine (vocab 著者向け) | select key 幅 ≤8 bit / select key 本数 ≤3 / variable-trail scale は 2 冪のみ / self-loop 反復上限あり (vocab の `<SELF>_MAX_DEPTH` で declare) |
 | Self-validation | parser-block 自検証 (`transition select(field) { v: accept; default: reject; }`) のみ。旧 SANITY const family は撤廃 (legacy 名は loud-fail で拒否) |
 | Vocab | 1 protocol あたり最大 2 ラベル |
-| Kernel | quantifier / parser self-loop あり: 5.17+ (`bpf_loop` 必須) / fixed chain のみ: さらに古くても可 |
+| Kernel | CI 実測: 6.1 / 6.6 / 6.12 / 6.18。 `bpf_loop` 経路 (chain quantifier + parser self-loop) は 5.17+ 必須 (= 理論上の floor、 CI 未実測)。 fixed chain は更に古い kernel でも可 |
 
 ### 7.2 アーキテクチャ上動かない要件
 

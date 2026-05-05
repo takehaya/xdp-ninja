@@ -219,12 +219,12 @@ func TestDynamicAuxSentinelOutsideValidRange(t *testing.T) {
 	}
 }
 
-// TestDynamicAuxSlotForLayoutAllocates pins the slot allocator: the
-// per-layer demand list's index into dynamicAuxOffsetSlot lines up
-// with the slot returned for a given layout. Slot for the first
-// queried option (kind 2 / mss) at layerPos 2 is
-// dynamicAuxOffsetSlotBase - (2 * dynamicAuxMaxSlotsPerLayer + 0) * 8
-// = -280 - 80 = -360 (with dynamicAuxMaxSlotsPerLayer = 5).
+// TestDynamicAuxSlotForLayoutAllocates pins the per-layer-demand-
+// sized stride: a single-layer program with one queried option at
+// layerPos 2 still gets slot -280 (= dynamicAuxOffsetSlotBase),
+// because no prior layer adds to the cumulative offset. Under the
+// previous fixed-stride allocator the same slot was -360 (= -280 -
+// 2×5×8); the new allocator skips empty layers entirely.
 func TestDynamicAuxSlotForLayoutAllocates(t *testing.T) {
 	specs, err := dslvocab.Bundled()
 	if err != nil {
@@ -242,8 +242,37 @@ func TestDynamicAuxSlotForLayoutAllocates(t *testing.T) {
 	if !ok {
 		t.Fatal("dynamicAuxSlotForLayout returned !ok for queried mss")
 	}
-	want := dynamicAuxOffsetSlotBase - int16(2*dynamicAuxMaxSlotsPerLayer)*8
+	if slot != dynamicAuxOffsetSlotBase {
+		t.Errorf("slot = %d, want %d (no prior-layer demand)", slot, dynamicAuxOffsetSlotBase)
+	}
+}
+
+// TestDynamicAuxSlotCumulativeOffset pins the stride pack: when
+// layer 0 has 2 queried options and layer 2 has 1, layer-2's first
+// slot starts at `-280 - 2×8 = -296` (after layer-0's 2 slots) —
+// not at the previous fixed-stride `-280 - 2×5×8 = -360`.
+func TestDynamicAuxSlotCumulativeOffset(t *testing.T) {
+	specs, err := dslvocab.Bundled()
+	if err != nil {
+		t.Fatalf("Bundled: %v", err)
+	}
+	tcpSpec := specs["tcp"]
+	priorLayer := &ir.LayerInstance{Spec: tcpSpec, LayerPos: 0}
+	currentLayer := &ir.LayerInstance{Spec: tcpSpec, LayerPos: 2}
+	mssLayout := tcpSpec.ParseStateMachine.AuxLayouts["mss"]
+	tsLayout := tcpSpec.ParseStateMachine.AuxLayouts["ts"]
+	sackPermLayout := tcpSpec.ParseStateMachine.AuxLayouts["sack_perm"]
+
+	qo := queriedOptions{
+		priorLayer:   {tsLayout, sackPermLayout},
+		currentLayer: {mssLayout},
+	}
+	slot, ok := qo.dynamicAuxSlotForLayout(currentLayer, mssLayout)
+	if !ok {
+		t.Fatal("dynamicAuxSlotForLayout returned !ok")
+	}
+	want := dynamicAuxOffsetSlotBase - int16(2)*8 // 2 prior demand entries
 	if slot != want {
-		t.Errorf("slot = %d, want %d", slot, want)
+		t.Errorf("slot = %d, want %d (cumulative = 2 × 8)", slot, want)
 	}
 }

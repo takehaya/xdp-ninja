@@ -117,9 +117,8 @@ func (qo queriedOptions) record(f *ir.FieldRef) {
 
 // dynamicAuxSlotForLayout returns the stack slot reserved for a
 // given (layer, queried-aux) pair. The per-layer demand list is
-// kind-byte-sorted; the layout's index in that list is its slot
-// index. dynamicAuxOffsetSlot translates (layerPos, slotIdx) into
-// the actual R10-relative offset.
+// kind-byte-sorted; the layout's index in that list times 8 plus
+// the cumulative offset of prior layers' demands is the slot.
 //
 // Returns (0, false) when the layout is not in the layer's demand
 // set — indicates the caller is reaching for a slot that wasn't
@@ -137,7 +136,7 @@ func (qo queriedOptions) dynamicAuxSlotForLayout(layer *ir.LayerInstance, layout
 		if l != layout {
 			continue
 		}
-		slot, err := dynamicAuxOffsetSlot(layer.LayerPos, idx+1)
+		slot, err := qo.slotForLayer(layer, idx+1)
 		if err != nil {
 			return 0, false
 		}
@@ -146,38 +145,45 @@ func (qo queriedOptions) dynamicAuxSlotForLayout(layer *ir.LayerInstance, layout
 	return 0, false
 }
 
-// dynamicAuxOffsetSlot returns the stack slot at index `slotIdx`
-// (1-based) for a layer at position `layerPos`. The block descends
-// from -280 in 8-byte steps; cap is dynamicAuxMaxSlotsPerLayer = 5
-// (TCP's MSS, WS, SACK_PERM, SACK, TS). Worst-case usage is
-// layerPos×5×8 + 5×8 bytes below the base; with the 7-layer
-// where-slot cap a chain can address up to TCP at layerPos=5 (slot
-// = -280 - 29×8 = -512, exactly at bpfStackBottom). The base was
-// pushed down by 24 bytes (from -256) when maxArithDepth was bumped
-// 8 → 16 — adding a 6th queried TCP option (raise
-// dynamicAuxMaxSlotsPerLayer past 5) or a 7th deep-chain layer
-// requires either a denser slot allocator (only allocate for
-// layers that actually query) or a wider region.
+// slotForLayer returns the stack slot at index `slotIdx` (1-based)
+// for `layer`'s demand list. Per-layer-demand-sized stride: the
+// cumulative offset is the sum of prior layers' actual demand
+// lengths (× 8 bytes), so layers that query 0 options consume 0
+// slots and layers that query N consume exactly N. This packs
+// better than the prior fixed `dynamicAuxMaxSlotsPerLayer = 5`
+// stride which reserved 40 bytes per layer regardless of demand,
+// freeing slot region headroom for deeper / wider vocabs.
 //
-// Bounds-checks against the 512-byte BPF stack so deep chains with
-// many TLV-walk-bearing layers can't silently land outside the
-// addressable region — the verifier would reject the load anyway,
-// but failing here gives the user the layer index and a chain-
-// shape pointer instead of a verifier opcode dump.
+// The base descends from -280 in 8-byte steps; bpfStackBottom (-512)
+// caps total demand at 29 slots (= 232 bytes). Worst-case packing
+// is `whereLayerEntrySlotCap (7) × dynamicAuxMaxSlotsPerLayer (5) =
+// 35 slots = 280 bytes` if every layer queried every option, which
+// would still exceed bpfStackBottom — but no realistic vocab gets
+// near that density. The error message names the layer and the
+// chain shape so the user can shrink either dimension.
 const dynamicAuxOffsetSlotBase = int16(-280)
 const dynamicAuxMaxSlotsPerLayer = 5
 const bpfStackBottom = int16(-512)
 
-func dynamicAuxOffsetSlot(layerPos, slotIdx int) (int16, error) {
+func (qo queriedOptions) slotForLayer(layer *ir.LayerInstance, slotIdx int) (int16, error) {
 	if slotIdx <= 0 || slotIdx > dynamicAuxMaxSlotsPerLayer {
 		return 0, fmt.Errorf("%w: dynamic aux slot %d out of range [1, %d]", ErrNotImplemented, slotIdx, dynamicAuxMaxSlotsPerLayer)
 	}
-	if layerPos < 0 || layerPos >= whereLayerEntrySlotCap {
-		return 0, fmt.Errorf("%w: dynamic aux slot for layer position %d exceeds cap %d", ErrNotImplemented, layerPos, whereLayerEntrySlotCap)
+	if layer.LayerPos < 0 || layer.LayerPos >= whereLayerEntrySlotCap {
+		return 0, fmt.Errorf("%w: dynamic aux slot for layer position %d exceeds cap %d", ErrNotImplemented, layer.LayerPos, whereLayerEntrySlotCap)
 	}
-	slot := dynamicAuxOffsetSlotBase - int16(layerPos*dynamicAuxMaxSlotsPerLayer+(slotIdx-1))*8
+	cumulative := 0
+	for other, demand := range qo {
+		if other == layer {
+			continue
+		}
+		if other.LayerPos < layer.LayerPos {
+			cumulative += len(demand)
+		}
+	}
+	slot := dynamicAuxOffsetSlotBase - int16(cumulative+(slotIdx-1))*8
 	if slot < bpfStackBottom {
-		return 0, fmt.Errorf("%w: dynamic aux slot for layer position %d slot %d (= %d) sits below the 512-byte BPF stack — chain has too many TLV-walk layers × queried options to fit", ErrNotImplemented, layerPos, slotIdx, slot)
+		return 0, fmt.Errorf("%w: dynamic aux slot for layer position %d slot %d (= %d) sits below the 512-byte BPF stack — total demand × 8 bytes exceeds the 232-byte slot region", ErrNotImplemented, layer.LayerPos, slotIdx, slot)
 	}
 	return slot, nil
 }

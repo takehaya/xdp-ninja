@@ -190,6 +190,16 @@ where any(ipv4.options.RR.addrs.addr == 192.168.1.1)
 
 **工数**: 計画時 1.5-2 d (再見積もり) → 実績 R1 contingency 込みで 1 d (PR-2) + 1 d (PR-3)。
 
+### B-6. cw `?` (NO_CHECK optional) codegen 未実装
+
+**動機**: parser_test / resolve_test で `eth/mpls+/cw?/eth@inner/ipv4/tcp` チェーンが parse + resolve まで通っているが、 verifier load を試行すると codegen が `optional "cw" with no-check dispatch cannot detect absence` で reject する。 cw は MPLS PW で deployment 次第で挿入される 4-byte marker (RFC 4385)、 NO_CHECK dispatch なので runtime には「next 4 bytes が cw か inner header か」 を判定する手段がない。
+
+**現状**: codegen 未対応。 `cw?` を含むチェーンは parser/resolver は通るが verifier load 不可。
+
+**スコープ**: 「heuristic で cw 有無を判定」 (例えば first_nibble == 0 を check) を codegen が実装するか、 `cw?` を fixed `cw` (= 必ず付いてる前提) に縛る。 RFC 4385 仕様上 first_nibble は 0 が typical (= `0x0_`) なので heuristic は実用上動く。
+
+**工数**: 0.5 d (heuristic peek emit + parser_machine 連動)、 別 PR。 当面 cw を含む chain は表現可能だが load 不可、 doc 上明示。
+
 ## P3: コード負債 / Sanity 系
 
 ### 11. Self-validating self-dispatch chain ❌ 不要 (= 設計の wrong question だった、layered dispatch で代替)
