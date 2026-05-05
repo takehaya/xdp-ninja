@@ -65,6 +65,40 @@ char _license[] SEC("license") = "GPL";
 
 const xdpSubfuncName = "process_packet"
 
+const tcFuncName = "tc_pass_test"
+
+const tcPassSource = `
+#include <linux/bpf.h>
+#include <linux/pkt_cls.h>
+#define SEC(NAME) __attribute__((section(NAME), used))
+SEC("classifier")
+int tc_pass_test(struct __sk_buff *skb) { return TC_ACT_OK; }
+char _license[] SEC("license") = "GPL";
+`
+
+// loadDummyTC compiles and loads a minimal tc clsact program with
+// BTF — peer of loadDummyXDP. The classifier returns TC_ACT_OK; the
+// xdp-ninja observer attaches as fentry/fexit and the dummy never
+// sees real traffic in unit tests, so the stub body suffices.
+func loadDummyTC(t *testing.T) *ebpf.Program {
+	t.Helper()
+	testutil.SkipIfNotRoot(t)
+
+	spec, err := ebpf.LoadCollectionSpec(testutil.CompileBPFSource(t, tcPassSource))
+	if err != nil {
+		t.Fatalf("loading collection spec: %v", err)
+	}
+
+	var objs struct {
+		Prog *ebpf.Program `ebpf:"tc_pass_test"`
+	}
+	if err := spec.LoadAndAssign(&objs, nil); err != nil {
+		t.Fatalf("loading TC program: %v", err)
+	}
+	t.Cleanup(func() { _ = objs.Prog.Close() })
+	return objs.Prog
+}
+
 // loadDummyXDP compiles and loads a minimal XDP_PASS program with BTF.
 func loadDummyXDP(t *testing.T) *ebpf.Program {
 	t.Helper()

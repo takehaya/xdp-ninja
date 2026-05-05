@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/codegen"
 )
@@ -44,7 +45,7 @@ func DumpAsm(w io.Writer, scope DumpScope, expr string, useDSL bool, mode string
 
 	// xdp-native uses zero Capabilities (no observed action atom),
 	// same shape as fentry — compileFilter(_, _, false) covers both.
-	out, err := compileFilter(expr, useDSL, isFexit)
+	out, err := compileFilter(expr, useDSL, isFexit, ebpf.XDP)
 	if err != nil {
 		return err
 	}
@@ -54,7 +55,9 @@ func DumpAsm(w io.Writer, scope DumpScope, expr string, useDSL bool, mode string
 	case DumpScopeFilter, "":
 		renderFilter(&buf, out, useDSL, mode)
 	case DumpScopeFull:
-		renderFull(&buf, out, mode, isFexit, isXDPNative)
+		if err := renderFull(&buf, out, mode, isFexit, isXDPNative); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("--dump-asm: unknown scope %q (expected: filter | full)", scope)
 	}
@@ -93,7 +96,7 @@ func renderFilter(buf *strings.Builder, out codegen.Output, useDSL bool, mode st
 	}
 }
 
-func renderFull(buf *strings.Builder, out codegen.Output, mode string, isFexit, isXDPNative bool) {
+func renderFull(buf *strings.Builder, out codegen.Output, mode string, isFexit, isXDPNative bool) error {
 	var (
 		insns asm.Instructions
 		shape string
@@ -102,10 +105,15 @@ func renderFull(buf *strings.Builder, out codegen.Output, mode string, isFexit, 
 		insns = buildXDPNativeInsns(out, 0)
 		shape = "XDP-native program"
 	} else {
-		insns = buildTracingInsns(out, nil, 0, 0, isFexit)
+		var err error
+		insns, err = buildTracingInsns(out, nil, 0, 0, isFexit, ebpf.XDP)
+		if err != nil {
+			return err
+		}
 		shape = "tracing program"
 	}
 
 	fmt.Fprintf(buf, "=== Full %s (mode=%s, target=<not-resolved>, map FDs=0 placeholder) ===\n\n", shape, mode)
 	fmt.Fprintln(buf, insns)
+	return nil
 }

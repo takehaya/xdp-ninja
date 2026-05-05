@@ -15,6 +15,7 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/takehaya/xdp-ninja/pkg/kunai"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/codegen"
+	tchost "github.com/takehaya/xdp-ninja/pkg/kunai/host/tc"
 	xdphost "github.com/takehaya/xdp-ninja/pkg/kunai/host/xdp"
 	"github.com/takehaya/xdp-ninja/internal/filter"
 	"golang.org/x/net/bpf"
@@ -62,7 +63,16 @@ func LoadExit(targetProg *ebpf.Program, funcName string, filterExpr string, argF
 }
 
 func loadProbe(targetProg *ebpf.Program, funcName string, filterExpr string, argFilters []filter.ArgFilter, isFexit, useDSL bool) (*Probe, error) {
-	filterOut, err := compileFilter(filterExpr, useDSL, isFexit)
+	info, err := targetProg.Info()
+	if err != nil {
+		return nil, fmt.Errorf("reading target program info: %w", err)
+	}
+	progType := info.Type
+	if progType != ebpf.XDP && progType != ebpf.SchedCLS && progType != ebpf.SchedACT {
+		return nil, fmt.Errorf("target program type %s is not supported (need XDP, SchedCLS, or SchedACT)", progType)
+	}
+
+	filterOut, err := compileFilter(filterExpr, useDSL, isFexit, progType)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +113,11 @@ func loadProbe(targetProg *ebpf.Program, funcName string, filterExpr string, arg
 		scratchFD = scratchMap.FD()
 	}
 
-	insns := buildTracingInsns(filterOut, argFilters, eventsMap.FD(), scratchFD, isFexit)
+	insns, err := buildTracingInsns(filterOut, argFilters, eventsMap.FD(), scratchFD, isFexit, progType)
+	if err != nil {
+		_ = probe.Close()
+		return nil, err
+	}
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
 		Name: fmt.Sprintf("xdp_ninja_%s", label), Type: ebpf.Tracing, AttachType: attachType,
 		AttachTo: funcName, AttachTarget: targetProg,
@@ -137,23 +151,29 @@ func loadProbe(targetProg *ebpf.Program, funcName string, filterExpr string, arg
 // ABI this wrapper plugs into is documented in
 // pkg/kunai/codegen/codegen.go (KunaiStackTop and the package doc).
 
-func compileFilter(expr string, useDSL, isFexit bool) (codegen.Output, error) {
+func compileFilter(expr string, useDSL, isFexit bool, progType ebpf.ProgramType) (codegen.Output, error) {
 	// Empty expression == capture everything: no filter to compile,
 	// callers wrap the zero Output with their own prologue/epilogue.
-	// Centralised here so attach modes (entry/exit/xdp) don't each
-	// reimplement the empty-filter policy and drift apart.
+	// Centralised here so attach modes (entry/exit/xdp/tc-*) don't
+	// each reimplement the empty-filter policy and drift apart.
 	if expr == "" {
 		return codegen.Output{}, nil
 	}
 	if useDSL {
-		// fexit attaches see the XDP retval at args[1]; fentry has no
-		// action value yet, so disable action atoms by passing the
-		// zero Capabilities. The xdp-ninja host wrapper saves the
-		// tracing args ptr at stack[-48] in either case, which is
-		// exactly the ABI xdphost.FexitFetcher expects.
+		// fexit attaches see the host retval at args[1] (XDP action
+		// or TC verdict, ABI shared); fentry has no action value yet
+		// so disable action atoms by passing zero Capabilities. The
+		// xdp-ninja host wrapper saves the tracing args ptr at
+		// stack[-48] in either case, which is exactly the ABI both
+		// FexitFetcher implementations expect.
 		var caps codegen.Capabilities
 		if isFexit {
-			caps = xdphost.FexitCapabilities()
+			switch progType {
+			case ebpf.XDP:
+				caps = xdphost.FexitCapabilities()
+			case ebpf.SchedCLS, ebpf.SchedACT:
+				caps = tchost.FexitCapabilities()
+			}
 		}
 		return kunai.Compile(expr, caps)
 	}
@@ -218,12 +238,16 @@ const (
 
 const bpfFCurrentCPU int64 = 0xFFFFFFFF
 
-func buildTracingInsns(filterOut codegen.Output, argFilters []filter.ArgFilter, eventsFD, scratchFD int, isFexit bool) asm.Instructions {
+func buildTracingInsns(filterOut codegen.Output, argFilters []filter.ArgFilter, eventsFD, scratchFD int, isFexit bool, progType ebpf.ProgramType) (asm.Instructions, error) {
 	var insns asm.Instructions
-	insns = append(insns, loadPacketPointers()...)
+	prelude, err := loadPacketPointers(progType)
+	if err != nil {
+		return nil, err
+	}
+	insns = append(insns, prelude...)
 	insns = append(insns, buildArgFilter(argFilters)...)
 	insns = append(insns, runFilter(filterOut.Main, scratchFD)...)
-	insns = append(insns, captureWithXdpOutput(eventsFD, isFexit, filterOut.Capture.MaxCapLen)...)
+	insns = append(insns, captureWithXdpOutput(eventsFD, isFexit, filterOut.Capture.MaxCapLen, progType)...)
 	insns = append(insns, asm.Mov.Imm(asm.R0, 0).WithSymbol("exit"), asm.Return())
 	// bpf2bpf subprograms (currently only DSL bpf_loop chain
 	// callbacks) live after the tracing body so they sit past the
@@ -234,25 +258,47 @@ func buildTracingInsns(filterOut codegen.Output, argFilters []filter.ArgFilter, 
 		insns[0] = btf.WithFuncMetadata(insns[0], codegen.MainFilterFuncBTF())
 		insns = append(insns, filterOut.Callbacks...)
 	}
-	return insns
+	return insns, nil
 }
 
-// loadPacketPointers は tracing args から xdp_buff のフィールドを直接読む。
-// xdp_buff は trusted pointer (BTF型付き) なので直接フィールドアクセスが可能。
+// loadPacketPointers は tracing args の args[0] (= host-specific
+// packet ctx) から packet 先頭・末尾・長さを host 別に読み出す。
+// trusted pointer (BTF 型付き) として trampoline が保証してくれる。
 //
-// 終了時: R6=xdp_buff, R7=data, R8=data_end, R9=pkt_len, stack[-48]=args
-func loadPacketPointers() asm.Instructions {
-	return asm.Instructions{
-		asm.StoreMem(asm.R10, -48, asm.R1, asm.DWord), // args ポインタを退避
-		asm.LoadMem(asm.R6, asm.R1, 0, asm.DWord),     // R6 = args[0] = xdp_buff *
-
-		// xdp_buff の構造体フィールドを直接読む (trusted pointer)
-		asm.LoadMem(asm.R7, asm.R6, 0, asm.DWord), // R7 = xdp_buff->data
-		asm.LoadMem(asm.R8, asm.R6, 8, asm.DWord), // R8 = xdp_buff->data_end
-
-		asm.Mov.Reg(asm.R9, asm.R8), // R9 = pkt_len
-		asm.Sub.Reg(asm.R9, asm.R7),
+// 終了時: R6=ctx, R7=data, R8=data_end, R9=pkt_len, stack[-48]=args
+func loadPacketPointers(progType ebpf.ProgramType) (asm.Instructions, error) {
+	prelude := asm.Instructions{
+		asm.StoreMem(asm.R10, -48, asm.R1, asm.DWord),
+		asm.LoadMem(asm.R6, asm.R1, 0, asm.DWord),
 	}
+	switch progType {
+	case ebpf.XDP:
+		// args[0] は kernel struct xdp_buff *。 data @ +0, data_end
+		// @ +8 (どちらも 8B pointer、 ABI 安定なので hardcode)。
+		return append(prelude,
+			asm.LoadMem(asm.R7, asm.R6, 0, asm.DWord),
+			asm.LoadMem(asm.R8, asm.R6, 8, asm.DWord),
+			asm.Mov.Reg(asm.R9, asm.R8),
+			asm.Sub.Reg(asm.R9, asm.R7),
+		), nil
+	case ebpf.SchedCLS, ebpf.SchedACT:
+		// args[0] は kernel struct sk_buff * (BPF が見せる
+		// __sk_buff のラッパ rewrite は fexit context で発火しない)。
+		// member offset は kernel version で動くので runtime BTF
+		// resolve が必要。 data_end は sk_buff にないので
+		// data + len で計算。
+		dataOff, lenOff, err := skBuffPacketOffsets()
+		if err != nil {
+			return nil, fmt.Errorf("resolving struct sk_buff offsets via BTF: %w", err)
+		}
+		return append(prelude,
+			asm.LoadMem(asm.R7, asm.R6, int16(dataOff), asm.DWord), // R7 = skb->data
+			asm.LoadMem(asm.R9, asm.R6, int16(lenOff), asm.Word),   // R9 = skb->len
+			asm.Mov.Reg(asm.R8, asm.R7),
+			asm.Add.Reg(asm.R8, asm.R9), // R8 = data + len
+		), nil
+	}
+	return nil, fmt.Errorf("unsupported program type %s", progType)
 }
 
 // runFilter は scratch buffer にヘッダをコピーして cbpfc フィルタを実行する。
@@ -288,17 +334,16 @@ func runFilter(filter asm.Instructions, scratchFD int) asm.Instructions {
 	return insns
 }
 
-// captureWithXdpOutput は bpf_xdp_output でパケットを perf buffer に送出する。
-//
-// bpf_xdp_output(xdp_buff, perf_map, (pkt_len << 32) | BPF_F_CURRENT_CPU, &metadata, sizeof(metadata))
-//
-// カーネルが xdp_buff->data から pkt_len バイトを自動的にコピーして
-// perf event に付加してくれるので、bpf_probe_read_kernel でのパケットコピーが不要。
+// captureWithXdpOutput は bpf_xdp_output / bpf_skb_output でパケットを
+// perf buffer に送出する。XDP では bpf_xdp_output、TC (sched_cls /
+// sched_act) では同じ ABI の bpf_skb_output を発行 — どちらも
+// 「ctx, perf_map, (cap_len<<32)|CURRENT_CPU, &meta, sizeof(meta)」
+// で kernel が ctx から packet bytes を自動 attach してくれる。
 //
 // ユーザーランドで受け取る RawSample のフォーマット:
 //
-//	[metadata (8B)] [パケットデータ (pkt_len バイト)]
-func captureWithXdpOutput(eventsFD int, isFexit bool, maxCapLen int) asm.Instructions {
+//	[metadata (8B)] [パケットデータ (cap_len バイト)]
+func captureWithXdpOutput(eventsFD int, isFexit bool, maxCapLen int, progType ebpf.ProgramType) asm.Instructions {
 	if maxCapLen <= 0 {
 		maxCapLen = defaultCapLen
 	}
@@ -348,9 +393,13 @@ func captureWithXdpOutput(eventsFD int, isFexit bool, maxCapLen int) asm.Instruc
 		asm.Mov.Reg(asm.R4, asm.R10), // R4 = &metadata
 		asm.Add.Imm(asm.R4, -int32(metadataSize)),
 		asm.Mov.Imm(asm.R5, int32(metadataSize)), // R5 = 8
-
-		asm.FnXdpOutput.Call(),
 	)
+	switch progType {
+	case ebpf.SchedCLS, ebpf.SchedACT:
+		insns = append(insns, asm.FnSkbOutput.Call())
+	default:
+		insns = append(insns, asm.FnXdpOutput.Call())
+	}
 
 	return insns
 }
