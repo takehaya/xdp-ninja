@@ -3,6 +3,7 @@ package program
 import (
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 )
 
@@ -21,9 +22,9 @@ import (
 // test -bench` output captures both compile time and emitted size.
 
 type compileBench struct {
-	name        string
-	cbpfcExpr   string // empty when no cbpfc equivalent exists
-	dslExpr     string // empty when no DSL equivalent exists
+	name      string
+	cbpfcExpr string // empty when no cbpfc equivalent exists
+	dslExpr   string // empty when no DSL equivalent exists
 }
 
 var compileBenches = []compileBench{
@@ -80,14 +81,14 @@ func benchmarkCompile(b *testing.B, expr string, useDSL bool) {
 	b.Helper()
 	// Warm the vocab / first-call paths so the steady-state numbers
 	// are not skewed by sync.Once-style one-time work.
-	if _, err := compileFilter(expr, useDSL, false); err != nil {
+	if _, err := compileFilter(expr, useDSL, false, ebpf.XDP); err != nil {
 		b.Fatalf("compileFilter(%q): %v", expr, err)
 	}
 
 	var lastInsns int
 	b.ResetTimer()
 	for range b.N {
-		out, err := compileFilter(expr, useDSL, false)
+		out, err := compileFilter(expr, useDSL, false, ebpf.XDP)
 		if err != nil {
 			b.Fatalf("compileFilter(%q): %v", expr, err)
 		}

@@ -556,7 +556,7 @@ NOT は inner success label を作って `Ja failLabel` で反転。
 
 **het-alt 後の field addressing**: resolver の `markRuntimeOffsetLayers` が het-alt より後ろの layer を `NeedsRuntimeOffset = true` でマーク。codegen は `layerAnchorFor` でその layer の field load を **abs anchor (R0+静的 prefix)** ではなく **slot anchor (R10[whereLayerEntrySlot] + R0)** で emit。det-alt の無い filter は完全 fast path を維持 (slot 経路ゼロ、命令数増加なし)。詳細は `codegen.go::layerAnchor` 周辺と `where.go::layerAnchorFor`。
 
-action atom (`action == NAME`): codegen は `caps.ActionFetcher.EmitFetch(R3)` を呼んで R3 に action u32 をロードする命令列を取得し、続けて `JNE R3, caps.Action[NAME], dsl_reject` を emit。**XDP fexit ABI** (`pkg/kunai/host/xdp.FexitFetcher`) は `stack[-48] → args[1]` の 2 段 LDX を返す既定実装。`caps.Action == nil` のときは resolver が atom を拒否 (host が action 値を提供できない)。tc clsact / userspace target は `pkg/kunai/host/<name>/` で独自の fetcher を実装すれば再利用可能 — kunai コアは host 知識を持たない。
+action atom (`action == NAME`): codegen は `caps.ActionFetcher.EmitFetch(R3)` を呼んで R3 に action u32 をロードする命令列を取得し、続けて `JNE R3, caps.Action[NAME], dsl_reject` を emit。 既定 fexit ABI (`pkg/kunai/host/xdp.FexitFetcher` / `pkg/kunai/host/tc.FexitFetcher`) は `stack[-48] → args[1]` の 2 段 LDX を返す。 BPF tracing args ABI が host 非依存なので EmitFetch ロジックは XDP / tc で共通、 違いは Actions map の値 (XDP_DROP=1 vs TC_ACT_SHOT=2 等)。 `caps.Action == nil` のときは resolver が atom を拒否 (host が action 値を提供できない)。 userspace target 等は `pkg/kunai/host/<name>/` で独自の fetcher を実装すれば再利用可能 — kunai コアは host 知識を持たない。
 
 ### 4.7 capture 節
 

@@ -47,7 +47,7 @@ func LoadXDPNative(state *attach.InterfaceState, filterExpr string, useDSL bool)
 	// isFexit=false so kunai gets zero Capabilities — XDP-native has
 	// no observed action atom (the program decides the action, doesn't
 	// read one), same shape fentry uses.
-	out, err := compileFilter(filterExpr, useDSL, false)
+	out, err := compileFilter(filterExpr, useDSL, false, ebpf.XDP)
 	if err != nil {
 		return nil, err
 	}

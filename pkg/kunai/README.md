@@ -127,7 +127,7 @@ caps := xdphost.FexitCapabilities()
 out, err := kunai.Compile(expr, caps)
 ```
 
-Other hosts (tc clsact, userspace `BPF_PROG_TEST_RUN`, custom tracing) supply their own `ActionFetcher` + symbolic-name map by adding a `host/<name>/` package alongside `host/xdp/`. See [`codegen/caps.go`](./codegen/caps.go) for the `Capabilities` / `ActionFetcher` contract and [`codegen/codegen.go`](./codegen/codegen.go)'s package doc for the runFilter ABI the host wraps.
+Other hosts (userspace `BPF_PROG_TEST_RUN`, custom tracing) supply their own `ActionFetcher` + symbolic-name map by adding a `host/<name>/` package alongside `host/xdp/`. See [`codegen/caps.go`](./codegen/caps.go) for the `Capabilities` / `ActionFetcher` contract and [`codegen/codegen.go`](./codegen/codegen.go)'s package doc for the runFilter ABI the host wraps.
 
 Errors are returned as-is from each phase. Recognise them with `errors.As`/`errors.Is`:
 
@@ -147,7 +147,7 @@ Vocabulary parsing is memoised: `dslvocab.Bundled()` (in `pkg/kunai/dslvocab/`) 
 
 ## Versioning & stability
 
-- Public API: `kunai.Compile`, `codegen.Capabilities`, `codegen.ActionFetcher`, `codegen.Output`, `codegen.CaptureInfo`, the `host/xdp` adapter package, and the error types listed above.
+- Public API: `kunai.Compile`, `codegen.Capabilities`, `codegen.ActionFetcher`, `codegen.Output`, `codegen.CaptureInfo`, the `host/xdp` and `host/tc` adapter packages, and the error types listed above.
 - Everything else (AST nodes, IR types, vocab loader internals, parser internals, the `dslvocab.Bundled` cache) may change without notice.
 - `pkg/kunai/dsltest` (the gopacket-based packet-level harness) is **experimental** until 1.0 — its `Runner` API and packet builders may change without notice. Pin a tagged version if downstream tests depend on it.
 - The protocol vocabulary is treated as part of the public surface — adding new protocols is non-breaking; renaming or removing one is a breaking change.

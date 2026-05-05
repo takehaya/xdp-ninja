@@ -41,7 +41,7 @@ var flags = []cli.Flag{
 	},
 	&cli.StringFlag{
 		Name: "mode", Value: "entry",
-		Usage: "capture point: entry (before XDP, fentry observer), exit (after XDP, fexit observer), or xdp (attach as native XDP)",
+		Usage: "capture point: entry / exit (XDP fentry/fexit observer), tc-entry / tc-exit (tc clsact fentry/fexit observer), or xdp (attach as native XDP)",
 	},
 	&cli.IntFlag{
 		Name: "count", Aliases: []string{"c"},
@@ -104,9 +104,11 @@ func main() {
 		Description: `Outputs pcap (pcapng) to stdout. Pipe to tcpdump, wireshark, etc.
 
 Modes (--mode):
-  entry  fentry on the existing XDP — observe packets before the program runs (default)
-  exit   fexit on the existing XDP — observe action returned (filter on XDP_PASS/DROP/...)
-  xdp    attach as the primary XDP on the netdev (no existing XDP needed)
+  entry     fentry on the existing XDP — observe packets before the program runs (default)
+  exit      fexit on the existing XDP — observe action returned (filter on XDP_PASS/DROP/...)
+  tc-entry  fentry on a tc clsact program (specify target via -p)
+  tc-exit   fexit on a tc clsact program (filter on TC_ACT_OK/SHOT/...)
+  xdp       attach as the primary XDP on the netdev (no existing XDP needed)
 
 Examples:
   xdp-ninja -i eth0 | tcpdump -n -r -
@@ -137,15 +139,20 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	mode := cmd.String("mode")
-	var isFexit, isXDPNative bool
+	var isFexit, isXDPNative, isTC bool
 	switch mode {
 	case "entry":
 	case "exit":
 		isFexit = true
+	case "tc-entry":
+		isTC = true
+	case "tc-exit":
+		isTC = true
+		isFexit = true
 	case "xdp":
 		isXDPNative = true
 	default:
-		return fmt.Errorf("invalid mode %q: must be entry, exit, or xdp", mode)
+		return fmt.Errorf("invalid mode %q: must be entry, exit, tc-entry, tc-exit, or xdp", mode)
 	}
 
 	if scope := cmd.String("dump-asm"); scope != "" {
@@ -161,7 +168,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return runXDPNative(cmd)
 	}
 
-	info, err := findTarget(cmd)
+	info, err := findTarget(cmd, isTC)
 	if err != nil {
 		return err
 	}
@@ -371,7 +378,7 @@ func validateXDPNativeFlags(cmd *cli.Command) error {
 	return nil
 }
 
-func findTarget(cmd *cli.Command) (*attach.XDPInfo, error) {
+func findTarget(cmd *cli.Command, isTC bool) (*attach.ProgInfo, error) {
 	ifaceName := cmd.String("interface")
 	progID := cmd.Int("prog-id")
 
@@ -382,13 +389,22 @@ func findTarget(cmd *cli.Command) (*attach.XDPInfo, error) {
 		return nil, fmt.Errorf("specify -i <interface> or -p <prog-id>")
 	}
 
+	if isTC {
+		// tc clsact targets are addressed by program ID — no
+		// interface-based clsact qdisc walk wired up yet.
+		if ifaceName != "" {
+			return nil, fmt.Errorf("--mode tc-* requires -p <prog-id>; interface-based tc target lookup is not implemented")
+		}
+		return attach.FindBPFProgramByID(uint32(progID))
+	}
+
 	if progID != 0 {
 		return attach.FindXDPProgramByID(uint32(progID))
 	}
 	return attach.FindXDPProgram(ifaceName)
 }
 
-func loadProbe(isFexit bool, info *attach.XDPInfo, filterExpr string, argFilters []filter.ArgFilter, useDSL bool) (*program.Probe, error) {
+func loadProbe(isFexit bool, info *attach.ProgInfo, filterExpr string, argFilters []filter.ArgFilter, useDSL bool) (*program.Probe, error) {
 	if isFexit {
 		return program.LoadExit(info.Program, info.FuncName, filterExpr, argFilters, useDSL)
 	}

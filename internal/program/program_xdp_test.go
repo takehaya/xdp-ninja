@@ -78,7 +78,7 @@ func TestBpfXDPNativeLoad(t *testing.T) {
 // Mirrors loadProbeOrFail but skips the attach step.
 func loadXDPNativeOrFail(t *testing.T, expr string, useDSL bool) {
 	t.Helper()
-	out, err := compileFilter(expr, useDSL, false)
+	out, err := compileFilter(expr, useDSL, false, ebpf.XDP)
 	if err != nil {
 		t.Fatalf("compile %q: %v", expr, err)
 	}

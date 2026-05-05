@@ -200,10 +200,43 @@ var dslExitExprs = []string{
 	"eth/ipv4/tcp where action == XDP_PASS or action == XDP_TX",
 }
 
+// dslTCEntryExprs is the tc clsact fentry-side DSL matrix. A subset
+// of dslEntryExprs that exercises the kunai-host-agnostic compile +
+// the new tc context loading path (skb->data / data_end / len read
+// via verifier-rewritten __sk_buff offsets).
+var dslTCEntryExprs = []string{
+	"eth/ipv4/tcp",
+	"eth/ipv4/udp",
+	"eth/ipv6/tcp",
+	"eth/ipv4/tcp[dport==443]",
+	"eth/ipv4/tcp where tcp.dport == 443",
+	"eth/ipv4/tcp capture headers+64",
+	"eth/(ipv4|ipv6)/tcp",
+	"eth/vlan+/ipv4/tcp",
+	"eth/ipv4/ipv4/tcp",
+}
+
+// dslTCExitExprs covers tc clsact fexit-side action atoms — the
+// whole point of the tc adapter is that `where action == TC_ACT_*`
+// resolves correctly via tchost.FexitCapabilities.
+var dslTCExitExprs = []string{
+	"eth/ipv4/tcp",
+	"eth/ipv4/tcp where action == TC_ACT_SHOT",
+	"eth/ipv4/tcp where action == TC_ACT_OK or action == TC_ACT_REDIRECT",
+}
+
 func TestBpfEntryWithDSLFilter(t *testing.T) {
 	runFilterMatrix(t, loadDummyXDP(t), xdpFuncName, dslEntryExprs, false, true)
 }
 
 func TestBpfExitWithDSLFilter(t *testing.T) {
 	runFilterMatrix(t, loadDummyXDP(t), xdpFuncName, dslExitExprs, true, true)
+}
+
+func TestBpfEntryWithDSLFilterTC(t *testing.T) {
+	runFilterMatrix(t, loadDummyTC(t), tcFuncName, dslTCEntryExprs, false, true)
+}
+
+func TestBpfExitWithDSLFilterTC(t *testing.T) {
+	runFilterMatrix(t, loadDummyTC(t), tcFuncName, dslTCExitExprs, true, true)
 }
