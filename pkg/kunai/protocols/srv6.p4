@@ -51,10 +51,9 @@ parser SRv6Parser(packet_in pkt,
         }
     }
     // Variable trail: skip the (hdr_ext_len * 8)-byte region holding
-    // segments + TLVs. p4lite lowers `(hdr.F & MASK) << S` to the
-    // verifier-friendly HeaderLength tuple {LenByteOff=1, LenMask=0x0F,
-    // LenShift=0, Scale=8, Base=0} — equivalent to the legacy
-    // codegen/parser_trail.go::knownVariableTails["srv6_h"] entry.
+    // segments + TLVs. Mask 0x0F caps the runtime advance at 120 bytes
+    // so the verifier sees a static upper bound; well-formed SRv6
+    // frames stay well under this cap.
     state skip_segments {
         pkt.advance(((bit<32>)(hdr.hdr_ext_len & 0x0F)) << 6);
         transition accept;

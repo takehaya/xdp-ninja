@@ -74,10 +74,8 @@ func (p *parser) accept(k TokenKind) (Token, bool, error) {
 func (p *parser) parseFile() (*File, error) {
 	f := &File{}
 	// pending accumulates @-prefixed annotations encountered before the
-	// next declaration. The trailing-annotation guard (`len > 0` at EOF
-	// and before extern, which p4lite treats as opaque) prevents
-	// annotations from silently being dropped when the user mis-orders
-	// them.
+	// next declaration so a dangling @anno (EOF or before an extern
+	// p4lite can't decorate) errors instead of silently dropping.
 	var pending []Annotation
 	for p.cur.Kind != TokEOF {
 		switch p.cur.Kind {
@@ -153,10 +151,10 @@ func (p *parser) parseAnnotation() (*Annotation, error) {
 	default:
 		return nil, p.errorf(p.cur.Pos, "expected '[' to start structured annotation arg list for @%s, got %s", nameTok.Value, p.cur.Kind)
 	}
-	if err := p.advance(); err != nil {
+	if _, err := p.expect(TokLBracket); err != nil {
 		return nil, err
 	}
-	kvs := map[string]AnnotationValue{}
+	var kvs map[string]AnnotationValue
 	for p.cur.Kind != TokRBracket {
 		keyTok, err := p.expect(TokIdent)
 		if err != nil {
@@ -172,16 +170,14 @@ func (p *parser) parseAnnotation() (*Annotation, error) {
 		if _, exists := kvs[keyTok.Value]; exists {
 			return nil, p.errorf(keyTok.Pos, "duplicate annotation key %q in @%s", keyTok.Value, nameTok.Value)
 		}
+		if kvs == nil {
+			kvs = make(map[string]AnnotationValue)
+		}
 		kvs[keyTok.Value] = val
-		switch p.cur.Kind {
-		case TokComma:
-			if err := p.advance(); err != nil {
-				return nil, err
-			}
-		case TokRBracket:
-			// loop will exit
-		default:
-			return nil, p.errorf(p.cur.Pos, "expected ',' or ']' after annotation key=value in @%s, got %s", nameTok.Value, p.cur.Kind)
+		if _, ok, err := p.accept(TokComma); err != nil {
+			return nil, err
+		} else if !ok {
+			break
 		}
 	}
 	if _, err := p.expect(TokRBracket); err != nil {
@@ -986,7 +982,7 @@ func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok To
 	var baseWords, mask int
 	switch opTok.Kind {
 	case TokMinus:
-		if err := p.advance(); err != nil {
+		if _, err := expectShape(TokMinus); err != nil {
 			return nil, err
 		}
 		kTok, err := expectShape(TokInt)
@@ -994,11 +990,11 @@ func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok To
 			return nil, err
 		}
 		if kTok.Int > uint64(maxInt32) {
-			return nil, p.errorf(kTok.Pos, "K=%d exceeds the supported range for the BaseWords slot", kTok.Int)
+			return nil, p.errorf(kTok.Pos, "K=%d exceeds the int32 range", kTok.Int)
 		}
 		baseWords = int(kTok.Int)
 	case TokAmp:
-		if err := p.advance(); err != nil {
+		if _, err := expectShape(TokAmp); err != nil {
 			return nil, err
 		}
 		mTok, err := expectShape(TokInt)
@@ -1009,7 +1005,7 @@ func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok To
 			return nil, p.errorf(mTok.Pos, "mask MASK=0 makes the advance always zero — unintended")
 		}
 		if mTok.Int > uint64(maxInt32) {
-			return nil, p.errorf(mTok.Pos, "MASK=0x%x exceeds the supported range for the Mask slot", mTok.Int)
+			return nil, p.errorf(mTok.Pos, "MASK=0x%x exceeds the int32 range", mTok.Int)
 		}
 		mask = int(mTok.Int)
 	default:

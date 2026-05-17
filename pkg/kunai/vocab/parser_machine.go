@@ -945,20 +945,15 @@ func lowerCastShiftSkip(target, fieldName string, baseWords, userMask, scaleLog2
 	}
 	scaleBytes := 1 << (scaleLog2 - 3)
 	lsbShift := 8 - bitInByte - fieldBits
-	fieldExtractionMask := ((1 << fieldBits) - 1) << lsbShift
-	mask := fieldExtractionMask
+	mask := ((1 << fieldBits) - 1) << lsbShift
 	if userMask != 0 {
-		// userMask is expressed against the field value; shift into the
-		// containing byte's coordinate then intersect with the field's
-		// own bit window so out-of-field bits in userMask are silently
-		// dropped after a clear validation below.
+		// userMask is expressed against the field value; reject anything
+		// that doesn't fit so the byte-shifted mask stays inside the
+		// field's own bit window. Parser already rejects userMask=0.
 		if userMask >= (1 << fieldBits) {
 			return nil, nil, fmt.Errorf("%s:%s: %s mask MASK=0x%x exceeds the %d-bit field %q (max 0x%x)", ctx.source, pos, opName, userMask, fieldBits, fieldName, (1<<fieldBits)-1)
 		}
-		mask = fieldExtractionMask & (userMask << lsbShift)
-		if mask == 0 {
-			return nil, nil, fmt.Errorf("%s:%s: %s mask combined with field %q yields zero — unintended", ctx.source, pos, opName, fieldName)
-		}
+		mask = userMask << lsbShift
 	}
 	return &HeaderLength{
 		LenByteOff: bitOff / 8,

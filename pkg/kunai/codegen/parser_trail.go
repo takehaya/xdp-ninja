@@ -63,11 +63,6 @@ type writeBackOp struct {
 //     write-back keeps ipv6.next_header in sync with the chain tail
 //     so the next layer's dispatch (TCP_IPV6_NEXT_HEADER etc.) sees
 //     the inner protocol rather than the first ext type.
-//
-// srv6_h was migrated to a native pkt.advance in srv6.p4's
-// skip_segments state; the trail params (Scale=8, Mask=0x0F, etc.)
-// now flow through the existing AdvanceOp path that emits the same
-// variableTailSkip via state.Advances in parser_state.go.
 var knownVariableTails = map[string]variableTailSkip{
 	"ipv6_ext_h": {
 		LenFieldByteOff: 1,

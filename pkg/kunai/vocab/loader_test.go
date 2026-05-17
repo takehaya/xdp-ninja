@@ -734,12 +734,10 @@ func auxLayoutNames(m map[string]*AuxLayout) []string {
 }
 
 func TestParseStateMachineSrv6(t *testing.T) {
-	// srv6.p4 now has 2 states: `start` extracts the SRH primary and
-	// transitions to `skip_segments` on routing_type==4 (reject
-	// otherwise); `skip_segments` runs the variable trail via
-	// pkt.advance and accepts. This replaced the legacy single-state
-	// shape where the variable trail came from a Go-side
-	// knownVariableTails entry keyed on srv6_h.
+	// 2 states: `start` extracts the SRH primary and transitions to
+	// `skip_segments` on routing_type==4 (reject otherwise);
+	// `skip_segments` runs the variable trail via pkt.advance and
+	// accepts.
 	specs := loadBundled(t)
 	srv6 := specs["srv6"]
 	if srv6 == nil || srv6.ParseStateMachine == nil {
