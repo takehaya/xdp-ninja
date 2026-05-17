@@ -60,11 +60,9 @@ type writeBackOp struct {
 
 // variableTailFor lowers a vocab.HeaderAnnotations entry into the
 // codegen-internal variableTailSkip the trail emit consumes. Returns
-// ok=false when the header has no @kunai_variable_tail annotation.
-// Every header that used to live in the hand-curated knownVariableTails
-// table (srv6_h, ipv6_ext_h) now drives its trailer through this
-// path — either via @kunai_variable_tail on the header or via a
-// pkt.advance lowered to AdvanceOp upstream.
+// ok=false when the header has no @kunai_variable_tail annotation
+// (the common case — headers whose trailer is expressed natively via
+// pkt.advance flow through state.Advances upstream).
 func variableTailFor(spec *vocab.ProtocolSpec, headerName string) (variableTailSkip, bool) {
 	if spec == nil || spec.HeaderAnnotations == nil {
 		return variableTailSkip{}, false

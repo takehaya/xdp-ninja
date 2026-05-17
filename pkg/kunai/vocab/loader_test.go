@@ -772,10 +772,9 @@ func TestParseStateMachineSrv6(t *testing.T) {
 }
 
 // TestIPv6ExtHeaderAnnotations pins the kunai-specific annotations
-// on ipv6_ext_h: the variable-trail params replace the legacy
-// codegen/parser_trail.go::knownVariableTails entry, and the writeback
-// resolves ipv6.next_header to the correct byte offset (6) so the
-// chain tail's next_header propagates to the parent layer.
+// on ipv6_ext_h: the variable-trail params and the writeback resolve
+// ipv6.next_header to byte offset 6 so the chain tail's next_header
+// propagates to the parent layer.
 func TestIPv6ExtHeaderAnnotations(t *testing.T) {
 	specs := loadBundled(t)
 	ipv6 := specs["ipv6"]

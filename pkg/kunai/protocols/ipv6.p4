@@ -46,9 +46,9 @@ const bit<8>  IPV6_IPV6_NEXT_HEADER = 41;
 // Cap the ext-header chain depth. Real frames almost never carry
 // more than 2 ext headers (HBH + DestOpt is the typical maximum);
 // the verifier needs the loop times the per-iteration max growth
-// (8 fixed + ≤24 variable per iter, see knownVariableTails) to stay
-// within the 256-byte scratch buffer, so 4 iterations is the
-// conservative ceiling.
+// (8 fixed + ≤24 variable per iter from @kunai_variable_tail on
+// ipv6_ext_h above) to stay within the 256-byte scratch buffer, so
+// 4 iterations is the conservative ceiling.
 const bit<8> IPV6_MAX_DEPTH = 4;
 
 // Self-validating parser: the start state's tuple-select rejects on

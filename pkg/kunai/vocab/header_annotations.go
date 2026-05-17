@@ -6,16 +6,6 @@ import (
 	"github.com/takehaya/xdp-ninja/pkg/kunai/vocab/p4lite"
 )
 
-// readHeaderAnnotations walks every header declaration in file and
-// lowers kunai-recognised @-decorators into HeaderAnnotations entries
-// keyed by header name. Unrecognised annotation names are tolerated so
-// authors can pin future-reserved hints without a parser flag day; the
-// keys of every recognised annotation are checked strictly so a typo
-// fails loudly rather than silently no-op'ing.
-//
-// Cross-protocol field references inside @kunai_writeback are parsed
-// but not resolved — the loader's pass-2 fills SourceByteOff /
-// ParentByteOff once every spec is in scope.
 // readParserOptionSegment scans the parser block's @-decorators for
 // @kunai_option_segment[name=IDENT]. Returns the declared segment
 // name or the empty string when no override exists; the loader treats
@@ -46,6 +36,16 @@ func readParserOptionSegment(file *p4lite.File, source string) (string, error) {
 	return "", nil
 }
 
+// readHeaderAnnotations walks every header declaration in file and
+// lowers kunai-recognised @-decorators into HeaderAnnotations entries
+// keyed by header name. Unrecognised annotation names are tolerated
+// so authors can pin future-reserved hints without a parser flag day;
+// the keys of every recognised annotation are checked strictly so a
+// typo fails loudly rather than silently no-op'ing.
+//
+// Cross-protocol field references inside @kunai_writeback are parsed
+// but not resolved — the loader's pass-2 fills ParentByteOff once
+// every spec is in scope.
 func readHeaderAnnotations(file *p4lite.File, source string) (map[string]*HeaderAnnotations, error) {
 	if file == nil {
 		return nil, nil
@@ -74,8 +74,6 @@ func readHeaderAnnotations(file *p4lite.File, source string) (map[string]*Header
 					return nil, fmt.Errorf("%s:%s: header %q declares @kunai_writeback twice", source, ann.Pos, h.Name)
 				}
 				entry.WriteBack = wb
-			default:
-				continue
 			}
 		}
 	}
@@ -114,7 +112,7 @@ func lowerKunaiVariableTail(ann p4lite.Annotation, h *p4lite.Header, source stri
 	if lenFieldVal.Kind != p4lite.AnnotationIdent {
 		return nil, fmt.Errorf("%s:%s: @kunai_variable_tail.len_field must be an identifier (got %v)", source, ann.Pos, lenFieldVal.Kind)
 	}
-	bitOff, fieldBits, ok := findHeaderFieldWindow(h, lenFieldVal.Ident)
+	bitOff, fieldBits, ok := findFieldBitWindow(h, lenFieldVal.Ident)
 	if !ok {
 		return nil, fmt.Errorf("%s:%s: @kunai_variable_tail.len_field references unknown field %q in header %q", source, ann.Pos, lenFieldVal.Ident, h.Name)
 	}
@@ -125,11 +123,8 @@ func lowerKunaiVariableTail(ann p4lite.Annotation, h *p4lite.Header, source stri
 	if err != nil {
 		return nil, err
 	}
-	if scale <= 0 {
-		return nil, fmt.Errorf("%s:%s: @kunai_variable_tail.scale must be positive (got %d)", source, ann.Pos, scale)
-	}
-	if !isPowerOfTwo(scale) {
-		return nil, fmt.Errorf("%s:%s: @kunai_variable_tail.scale must be a power of two (got %d)", source, ann.Pos, scale)
+	if scale <= 0 || scale&(scale-1) != 0 {
+		return nil, fmt.Errorf("%s:%s: @kunai_variable_tail.scale must be a positive power of two (got %d)", source, ann.Pos, scale)
 	}
 	bitInByte := bitOff % 8
 	lsbShift := 8 - bitInByte - fieldBits
@@ -186,7 +181,7 @@ func lowerKunaiWriteback(ann p4lite.Annotation, h *p4lite.Header, source string)
 	if srcVal.Kind != p4lite.AnnotationIdent {
 		return nil, fmt.Errorf("%s:%s: @kunai_writeback.source must be an identifier", source, ann.Pos)
 	}
-	bitOff, fieldBits, ok := findHeaderFieldWindow(h, srcVal.Ident)
+	bitOff, fieldBits, ok := findFieldBitWindow(h, srcVal.Ident)
 	if !ok {
 		return nil, fmt.Errorf("%s:%s: @kunai_writeback.source references unknown field %q in header %q", source, ann.Pos, srcVal.Ident, h.Name)
 	}
@@ -231,24 +226,6 @@ func readIntAnnotation(ann p4lite.Annotation, key string, source string) (int, e
 	return int(v.Int), nil
 }
 
-func findHeaderFieldWindow(h *p4lite.Header, name string) (bitOff, bits int, ok bool) {
-	off := 0
-	for _, f := range h.Fields {
-		if f.Name == name {
-			return off, f.Bits, true
-		}
-		off += f.Bits
-	}
-	return 0, 0, false
-}
-
-func isPowerOfTwo(n int) bool {
-	if n <= 0 {
-		return false
-	}
-	return n&(n-1) == 0
-}
-
 // resolveHeaderWritebackTargets fills ParentByteOff on every
 // WriteBackSpec across the spec set. Run after every protocol's
 // primary header is loaded so cross-protocol field references can be
@@ -266,7 +243,7 @@ func resolveHeaderWritebackTargets(specs map[string]*ProtocolSpec) error {
 			if !ok {
 				return fmt.Errorf("%s: @kunai_writeback on %q references unknown protocol %q", spec.Source, hname, wb.ParentProto)
 			}
-			bitOff, found := bitOffsetInFields(parent.Fields, wb.ParentField)
+			bitOff, _, found := BitOffsetIn(parent.Fields, wb.ParentField)
 			if !found {
 				return fmt.Errorf("%s: @kunai_writeback on %q references unknown field %q in protocol %q", spec.Source, hname, wb.ParentField, wb.ParentProto)
 			}
@@ -279,14 +256,4 @@ func resolveHeaderWritebackTargets(specs map[string]*ProtocolSpec) error {
 	return nil
 }
 
-func bitOffsetInFields(fields []Field, name string) (int, bool) {
-	off := 0
-	for _, f := range fields {
-		if f.Name == name {
-			return off, true
-		}
-		off += f.Bits
-	}
-	return 0, false
-}
 
