@@ -177,10 +177,14 @@ func (*ExtractStmt) stmtNode() {}
 type AdvanceKind int
 
 const (
-	// AdvanceField is the `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)`
+	// AdvanceField is the
+	// `pkt.advance(((bit<N>)(hdr.<F> - K)) << S)` (subtract form) or
+	// `pkt.advance(((bit<N>)(hdr.<F> & MASK)) << S)` (mask form)
 	// template — primary-header variable trailer (IPv4 IHL, TCP
-	// data_offset). Active fields: BitWidth, Target, FieldName,
-	// BaseWords, ScaleLog2.
+	// data_offset) and extension-header variable trailer (IPv6
+	// hdr_ext_len, SRH hdr_ext_len). Active fields: BitWidth, Target,
+	// FieldName, ScaleLog2, plus exactly one of BaseWords / Mask
+	// (parser sets BaseWords for `-`, Mask for `&`).
 	AdvanceField AdvanceKind = iota
 	// AdvanceLookahead is the
 	// `pkt.advance(((bit<N>)pkt.lookahead<bit<M>>()[lo:hi]) << S)`
@@ -209,7 +213,8 @@ type AdvanceStmt struct {
 	// AdvanceField only.
 	Target    string // the `hdr` in `hdr.<F>` — the parser's `out` parameter holding the field
 	FieldName string // the `<F>` in `hdr.<F>`
-	BaseWords int    // the K subtracted from the field value
+	BaseWords int    // the K subtracted from the field value (subtract form: (hdr.F - K))
+	Mask      int    // the MASK bitwise-AND'd with the field value (mask form: (hdr.F & MASK)). Zero = "no mask, subtract form active". Mask and BaseWords are mutually exclusive: parseAdvanceFieldOperand branches on `-` vs `&` and only sets one.
 
 	// AdvanceLookahead only.
 	LookaheadBits int // the M in `pkt.lookahead<bit<M>>()`

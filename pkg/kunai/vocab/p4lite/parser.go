@@ -544,6 +544,9 @@ func (p *parser) parseCounterSetCall(counter string, startPos Position) (Stmt, e
 	if adv.Kind != AdvanceField {
 		return nil, p.errorf(startPos, "%s.set requires the `((bit<N>)(hdr.<F> - K)) << S` template (lookahead form not supported here)", counter)
 	}
+	if adv.Mask != 0 {
+		return nil, p.errorf(startPos, "%s.set requires the subtract form `(hdr.<F> - K)`; mask form `(hdr.<F> & MASK)` is not supported here (CounterCallStmt has no Mask slot, the mask would be silently dropped)", counter)
+	}
 	return &CounterCallStmt{
 		Counter:   counter,
 		Op:        CounterSet,
@@ -838,8 +841,11 @@ func (p *parser) parseAdvanceCastedShift(obj string, startPos Position) (*Advanc
 	return adv, nil
 }
 
-// parseAdvanceFieldOperand parses `(hdr.<F> - K)` after the
-// `((bit<N>)` prefix. Cursor sits on the opening `(`.
+// parseAdvanceFieldOperand parses `(hdr.<F> - K)` (subtract form) or
+// `(hdr.<F> & MASK)` (mask form) after the `((bit<N>)` prefix. Cursor
+// sits on the opening `(`. Subtract form is used by primary-header
+// variable trailers (IPv4 IHL, TCP data_offset); mask form is used by
+// extension-header variable trailers (IPv6 hdr_ext_len, SRH hdr_ext_len).
 func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok Token, expectShape func(TokenKind) (Token, error)) (*AdvanceStmt, error) {
 	if _, err := expectShape(TokLParen); err != nil {
 		return nil, err
@@ -855,18 +861,44 @@ func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok To
 	if err != nil {
 		return nil, err
 	}
-	if _, err := expectShape(TokMinus); err != nil {
-		return nil, err
-	}
-	kTok, err := expectShape(TokInt)
-	if err != nil {
-		return nil, err
+	// Branch on `-` (subtract form) vs `&` (mask form). Any other
+	// token here is a parse error pointing at this position so the
+	// diagnostic names exactly which operator was expected.
+	opTok := p.cur
+	var baseWords, mask int
+	switch opTok.Kind {
+	case TokMinus:
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		kTok, err := expectShape(TokInt)
+		if err != nil {
+			return nil, err
+		}
+		if kTok.Int > uint64(maxInt32) {
+			return nil, p.errorf(kTok.Pos, "K=%d exceeds the supported range for the BaseWords slot", kTok.Int)
+		}
+		baseWords = int(kTok.Int)
+	case TokAmp:
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		mTok, err := expectShape(TokInt)
+		if err != nil {
+			return nil, err
+		}
+		if mTok.Int == 0 {
+			return nil, p.errorf(mTok.Pos, "mask MASK=0 makes the advance always zero — unintended")
+		}
+		if mTok.Int > uint64(maxInt32) {
+			return nil, p.errorf(mTok.Pos, "MASK=0x%x exceeds the supported range for the Mask slot", mTok.Int)
+		}
+		mask = int(mTok.Int)
+	default:
+		return nil, p.errorf(opTok.Pos, "expected `-` (subtract form) or `&` (mask form) after `hdr.<field>` inside pkt.advance, got %s", opTok.Kind)
 	}
 	if _, err := expectShape(TokRParen); err != nil {
 		return nil, err
-	}
-	if kTok.Int > uint64(maxInt32) {
-		return nil, p.errorf(kTok.Pos, "K=%d exceeds the supported range for the BaseWords slot", kTok.Int)
 	}
 	return &AdvanceStmt{
 		Object:    obj,
@@ -874,7 +906,8 @@ func (p *parser) parseAdvanceFieldOperand(obj string, startPos Position, nTok To
 		BitWidth:  int(nTok.Int),
 		Target:    hdrTok.Value,
 		FieldName: fldTok.Value,
-		BaseWords: int(kTok.Int),
+		BaseWords: baseWords,
+		Mask:      mask,
 		Pos:       startPos,
 	}, nil
 }

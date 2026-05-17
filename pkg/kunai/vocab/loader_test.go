@@ -1059,6 +1059,43 @@ func TestParserBlockAdvanceLowersToHeaderLength(t *testing.T) {
 			}`,
 			HeaderLength{LenByteOff: 0, LenMask: 0x0F, LenShift: 0, Scale: 4, Base: 20},
 		},
+		{
+			// SRv6 shape: hdr_ext_len (bit<8>) at byte 1, masked with
+			// 0x0F (= LenMask cap so verifier sees a static upper bound),
+			// scale 8 bytes/unit (= S=6 in bits: << 6 means << 3 in bytes
+			// after the scaleBytes = 1 << (S-3) normalisation), base 0.
+			"srv6_hdr_ext_len_mask",
+			`header foo_h { bit<8> next_header; bit<8> hdr_ext_len; bit<48> tail; }
+			parser P(packet_in pkt, out foo_h hdr) {
+				state start {
+					pkt.extract(hdr);
+					transition skip;
+				}
+				state skip {
+					pkt.advance(((bit<32>)(hdr.hdr_ext_len & 0x0F)) << 6);
+					transition accept;
+				}
+			}`,
+			HeaderLength{LenByteOff: 1, LenMask: 0x0F, LenShift: 0, Scale: 8, Base: 0},
+		},
+		{
+			// IPv6 ext header shape: hdr_ext_len (bit<8>) at byte 1,
+			// masked with 0x03 (tighter cap than SRv6 — IPv6 ext headers
+			// are typically ≤ 32 bytes in well-formed traffic), scale 8.
+			"ipv6_ext_hdr_ext_len_mask",
+			`header foo_h { bit<8> next_header; bit<8> hdr_ext_len; bit<48> tail; }
+			parser P(packet_in pkt, out foo_h hdr) {
+				state start {
+					pkt.extract(hdr);
+					transition skip;
+				}
+				state skip {
+					pkt.advance(((bit<32>)(hdr.hdr_ext_len & 0x03)) << 6);
+					transition accept;
+				}
+			}`,
+			HeaderLength{LenByteOff: 1, LenMask: 0x03, LenShift: 0, Scale: 8, Base: 0},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

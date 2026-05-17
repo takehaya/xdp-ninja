@@ -477,6 +477,78 @@ func TestParseAdvanceTemplateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseAdvanceMaskFormRoundTrip(t *testing.T) {
+	// Mask form `(hdr.<F> & MASK) << S` — extension-header variable
+	// trailer template used by IPv6 / SRv6 hdr_ext_len.
+	src := `parser P(packet_in pkt, out srv6_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		pkt.advance(((bit<32>)(hdr.hdr_ext_len & 0x0F)) << 3);
+		transition accept;
+	}
+}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	stmts := f.Parsers[0].States[0].Stmts
+	if len(stmts) != 2 {
+		t.Fatalf("stmts=%d, want 2", len(stmts))
+	}
+	adv, ok := stmts[1].(*AdvanceStmt)
+	if !ok {
+		t.Fatalf("stmt[1] is %T, want *AdvanceStmt", stmts[1])
+	}
+	want := AdvanceStmt{
+		Object:    "pkt",
+		Kind:      AdvanceField,
+		BitWidth:  32,
+		Target:    "hdr",
+		FieldName: "hdr_ext_len",
+		BaseWords: 0,
+		Mask:      0x0F,
+		ScaleLog2: 3,
+	}
+	if adv.Object != want.Object || adv.Kind != want.Kind || adv.BitWidth != want.BitWidth ||
+		adv.Target != want.Target || adv.FieldName != want.FieldName ||
+		adv.BaseWords != want.BaseWords || adv.Mask != want.Mask || adv.ScaleLog2 != want.ScaleLog2 {
+		t.Errorf("AdvanceStmt = %+v, want %+v", *adv, want)
+	}
+}
+
+func TestParseAdvanceMaskRejectsBadOperands(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"mask_zero", `pkt.advance(((bit<32>)(hdr.hdr_ext_len & 0)) << 3);`, "mask MASK=0"},
+		// 0x100 > 0xFF for an 8-bit field — caught at parse time by the
+		// uint64 → int32 range guard if it overflows, otherwise by the
+		// lowering's "exceeds the N-bit field" check (loader_test).
+		// Here we just test the parse-time MASK=0 rejection lives in the
+		// parser.
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `parser P(packet_in pkt, out srv6_h hdr) {
+	state start {
+		pkt.extract(hdr);
+		` + tc.body + `
+		transition accept;
+	}
+}`
+			_, err := Parse([]byte(src), "t.p4")
+			if err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.body)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 func TestParseAdvanceLiteralRoundTrip(t *testing.T) {
 	src := `parser P(packet_in pkt, out tcp_h hdr) {
 	state s {
