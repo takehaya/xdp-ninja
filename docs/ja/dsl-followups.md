@@ -58,6 +58,7 @@ F15   TC adapter             `pkg/kunai/host/tc/` 新規 (host/xdp の peer)。 
 R32   dynamic scratch        per-filter `FilterMinPrefix` で in-kernel scratch read を 512 B → 必要分のみに動的縮小。 fentry filter cost を 0.7→14.5 Mpps に解消 (paper §6 R32)
 R22   sharded ringbuf hoist  per-CPU ringbuf を `ARRAY_OF_MAPS` で entry/exit/xdp の全 attach mode に統一。 capture 出力は `path.pcap.cpuN` shards に分散
 SnapA snaplen Option A       `capture` 句なし = `capture all` の sugar (= MaxCapLen=0 → host DefaultCapLen=1500 fallback)。 tcpdump 互換 UX を優先、 ringbuf 予約縮小は `capture headers` 等で opt-in
+V4    P4 vocab-driven layout `codegen/parser_trail.go::knownVariableTails` ハードコード map + `resolve/where.go::optionsSegment` 予約名を完全削除。SRv6 は native `pkt.advance` で表現、ipv6_ext_h は `@kunai_variable_tail` + `@kunai_writeback` で表現、byte offset 6 (ipv6.next_header) は ipv6.p4 の field layout から動的解決。declare-only top-level aux stack は `@kunai_layout[after=primary|<stack>]` 必須化 (alias bug 防止)、chain 解決 + cycle 検出付き。filterset_test 30 sub-test insn count 全 byte-for-byte 維持、`p4c --parse-only` 通過
 ```
 
 ### ⚠️ Breaking changes since v0.x (master 投入時に release notes へ)
