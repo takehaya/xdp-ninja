@@ -29,6 +29,16 @@ jobs:
       - name: Unit Tests
         run: go test ./...
 
+      # Short fuzz gate (30s × 2 targets) to extend the seed corpus
+      # past `go test`'s seed-only run. Caches a fail to ./fuzz/ —
+      # any reproducer surfaces in the next pre-merge cycle. The
+      # cap is per-target so the total CI minute cost stays bounded.
+      - name: Fuzz (compile)
+        run: go test -run=^$ -fuzz=^FuzzCompile$ -fuzztime=30s ./pkg/kunai/
+
+      - name: Fuzz (lexer)
+        run: go test -run=^$ -fuzz=^FuzzLexNext$ -fuzztime=30s ./pkg/kunai/lexer/
+
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-24.04

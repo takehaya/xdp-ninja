@@ -538,6 +538,67 @@ func TestParseWhereNetworkLiteralOnLHS(t *testing.T) {
 	}
 }
 
+// TestParseWhereLHSLiteralBailReplay pins the bail/replay invariant
+// of tryLeadingNetworkLiteralCmp: when the LHS isn't a network
+// literal, the lexer must be restored exactly so the fallback arith
+// path sees the same multi-byte token the entry call had.
+// Hex and decimal integer LHS exercise multi-byte token boundaries —
+// a silent off-by-one in lexer.Restore/Next replay would consume the
+// wrong bytes and parseArithExpr would fail or read a different value.
+func TestParseWhereLHSLiteralBailReplay(t *testing.T) {
+	cases := []struct {
+		name     string
+		expr     string
+		wantOp   ast.CmpOp
+		wantLHS  uint64 // expected LHS literal value after bail+replay
+		wantRHSF string // expected RHS field path
+	}{
+		{
+			"hex_lhs_eq_field",
+			"eth/ipv4/tcp where 0x1bb == tcp.dport",
+			ast.CmpEq, 0x1bb, "tcp.dport",
+		},
+		{
+			"hex_lhs_large_eq_field",
+			"eth/ipv4/tcp where 0xDEADBEEF == tcp.seq",
+			ast.CmpEq, 0xDEADBEEF, "tcp.seq",
+		},
+		{
+			"decimal_lhs_eq_field",
+			"eth/ipv4/tcp where 443 == tcp.dport",
+			ast.CmpEq, 443, "tcp.dport",
+		},
+		{
+			"decimal_lhs_ordered_field",
+			// Ordered op with non-network LHS — bail path returns false,
+			// fallback succeeds with the legal arith ordered comparison.
+			"eth/ipv4/tcp where 1000 < tcp.seq",
+			ast.CmpLt, 1000, "tcp.seq",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := mustParse(t, c.expr)
+			if f.Where == nil || f.Where.Kind != ast.WAtomArith {
+				t.Fatalf("where kind = %v, want WAtomArith (= bail succeeded, fallback parsed integer LHS as arith)", f.Where.Kind)
+			}
+			if f.Where.Op != c.wantOp {
+				t.Errorf("op = %v, want %v", f.Where.Op, c.wantOp)
+			}
+			if f.Where.ArithL == nil || f.Where.ArithL.Kind != ast.ArithConst {
+				t.Fatalf("LHS = %+v, want ArithConst (bail must restore lexer so the integer literal re-parses correctly)", f.Where.ArithL)
+			}
+			if f.Where.ArithL.Const != c.wantLHS {
+				t.Errorf("LHS value = %d (0x%x), want %d (0x%x) — multi-byte token boundary regression in bail/replay",
+					f.Where.ArithL.Const, f.Where.ArithL.Const, c.wantLHS, c.wantLHS)
+			}
+			if f.Where.ArithR == nil || f.Where.ArithR.Field == nil || f.Where.ArithR.Field.String() != c.wantRHSF {
+				t.Errorf("RHS = %+v, want field %q", f.Where.ArithR, c.wantRHSF)
+			}
+		})
+	}
+}
+
 func TestParseWhereNetworkLiteralLHSOrderedRejected(t *testing.T) {
 	// Per dsl-types.md §6.2 network literals only support ==/!=. The
 	// ordered comparison falls through to the arith path which then

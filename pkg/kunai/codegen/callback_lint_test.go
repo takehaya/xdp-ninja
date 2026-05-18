@@ -8,29 +8,54 @@ import (
 	"github.com/cilium/ebpf/asm"
 )
 
-// TestAssertCallbackComplexityUnderThreshold pins that a callback
-// with branch count just below the cap passes.
-func TestAssertCallbackComplexityUnderThreshold(t *testing.T) {
-	insns := makeCallbackWithBranches(callbackBranchThreshold)
-	if err := assertCallbackComplexity(insns, "test_under"); err != nil {
-		t.Errorf("threshold case rejected: %v", err)
+// TestCallbackBranchThresholdValue pins the threshold constant itself
+// to 64. A silent change to this number (= raising or lowering it)
+// would shift the verifier-blowup risk envelope without surfacing in
+// the parametric tests below, since those reference the const rather
+// than a literal. The 64 number is rationalized in callback_lint.go's
+// docblock (worst-case TCP options walk ≈ 44 branches + 50% headroom);
+// a drift here MUST be accompanied by an update to that doc and to
+// the matching paper §6 limitations sentence.
+func TestCallbackBranchThresholdValue(t *testing.T) {
+	if callbackBranchThreshold != 64 {
+		t.Errorf("callbackBranchThreshold = %d, want 64 — see callback_lint.go docblock + dsl-followups.md B-2a class for rationale; if this is an intentional change, update both doc sources before bumping the literal here", callbackBranchThreshold)
 	}
 }
 
-// TestAssertCallbackComplexityOverThreshold pins that one extra
-// branch trips the assertion with ErrNotImplemented and a message
-// that names the callback symbol + branch count.
-func TestAssertCallbackComplexityOverThreshold(t *testing.T) {
-	insns := makeCallbackWithBranches(callbackBranchThreshold + 1)
-	err := assertCallbackComplexity(insns, "test_over")
-	if err == nil {
-		t.Fatal("expected ErrNotImplemented, got nil")
+// TestAssertCallbackComplexityBoundary table-pins the threshold's
+// pass/fail behaviour at the boundary. Three rows cover the standard
+// "off-by-one" failure modes: just-below (passes), exactly-at
+// (passes), and just-above (fails).
+func TestAssertCallbackComplexityBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		branches int
+		wantErr  bool
+	}{
+		{"just_below_threshold", callbackBranchThreshold - 1, false},
+		{"at_threshold", callbackBranchThreshold, false},
+		{"just_above_threshold", callbackBranchThreshold + 1, true},
 	}
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("err does not wrap ErrNotImplemented: %v", err)
-	}
-	if !strings.Contains(err.Error(), "test_over") {
-		t.Errorf("err missing callback symbol: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			insns := makeCallbackWithBranches(tc.branches)
+			err := assertCallbackComplexity(insns, "test_"+tc.name)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error at %d branches, got nil", tc.branches)
+				}
+				if !errors.Is(err, ErrNotImplemented) {
+					t.Errorf("err does not wrap ErrNotImplemented: %v", err)
+				}
+				if !strings.Contains(err.Error(), "test_"+tc.name) {
+					t.Errorf("err missing callback symbol: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("expected pass at %d branches, got %v", tc.branches, err)
+				}
+			}
+		})
 	}
 }
 
