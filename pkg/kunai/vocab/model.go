@@ -112,8 +112,8 @@ type StackLayoutSpec struct {
 // result as the iteration cap. The field must be byte-aligned and
 // exactly 8 bits wide so the LDX hits the whole value in one load.
 type StackCountSpec struct {
-	ByteOff int
-	Offset  int
+	ByteOff int // primary-header byte where the raw count value lives
+	Addend  int // integer added to the loaded byte to yield the final count (= SRv6 `last_entry + 1` would be Addend=1); intentionally NOT named "Offset" to avoid confusion with the sibling ByteOff
 }
 
 // HeaderAnnotations bundles kunai-specific decorators carried on a

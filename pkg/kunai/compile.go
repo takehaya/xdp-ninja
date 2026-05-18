@@ -57,9 +57,7 @@ func CompileWithVocab(expr string, v map[string]*vocab.ProtocolSpec, caps codege
 	if err != nil {
 		return codegen.Output{}, err
 	}
-	prog, err := resolve.ResolveWithOptions(f, v, caps.Action, resolve.Options{
-		StrictArithLint: caps.StrictArithLint,
-	})
+	prog, err := resolve.Resolve(f, v, caps.Action)
 	if err != nil {
 		return codegen.Output{}, err
 	}
