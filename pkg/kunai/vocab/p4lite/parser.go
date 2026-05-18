@@ -404,10 +404,19 @@ func (p *parser) parseParser() (*Parser, error) {
 	}
 	par := &Parser{Name: name.Value, Pos: startPos}
 	for p.cur.Kind != TokRParen && p.cur.Kind != TokEOF {
+		var paramAnnotations []Annotation
+		for p.cur.Kind == TokAt {
+			ann, err := p.parseAnnotation()
+			if err != nil {
+				return nil, err
+			}
+			paramAnnotations = append(paramAnnotations, *ann)
+		}
 		param, err := p.parseParam()
 		if err != nil {
 			return nil, err
 		}
+		param.Annotations = paramAnnotations
 		par.Params = append(par.Params, param)
 		if _, ok, err := p.accept(TokComma); err != nil {
 			return nil, err

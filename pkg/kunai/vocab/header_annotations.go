@@ -13,7 +13,146 @@ const (
 	annKunaiVariableTail = "kunai_variable_tail"
 	annKunaiWriteback    = "kunai_writeback"
 	annKunaiOptionSeg    = "kunai_option_segment"
+	annKunaiLayout       = "kunai_layout"
 )
+
+// stackLayoutAfterPrimary is the magic identifier the @kunai_layout
+// annotation uses to anchor an aux stack at the end of the primary
+// header. Future extension: `after=<other_stack>` walks the chain to
+// support multiple concurrent declare-only stacks.
+const stackLayoutAfterPrimary = "primary"
+
+// readParserParamLayouts walks the parser block's parameter list and
+// lowers each @kunai_layout decorator into a StackLayoutSpec keyed by
+// the parameter name. Only declare-only aux stacks (= `out X[N] name`
+// parameters never pushed inside a parser state) need this; the
+// caller filters by the "is this stack pushed somewhere?" criterion
+// after both `readParserParamLayouts` and the parser-machine pass
+// have run.
+//
+// The annotation grammar is `@kunai_layout[after=<IDENT>]` where the
+// identifier is either the literal `primary` (= anchor at the primary
+// header's byte end) or another stack's parameter name (chain — not
+// yet supported; reserved for a follow-up that walks dependencies).
+func readParserParamLayouts(file *p4lite.File, source string) (map[string]*StackLayoutSpec, error) {
+	if file == nil {
+		return nil, nil
+	}
+	allowed := map[string]bool{"after": true}
+	out := make(map[string]*StackLayoutSpec)
+	for _, par := range file.Parsers {
+		for _, prm := range par.Params {
+			for _, ann := range prm.Annotations {
+				if ann.Name != annKunaiLayout {
+					continue
+				}
+				if err := requireKnownKeys(ann, allowed, source); err != nil {
+					return nil, err
+				}
+				afterVal, ok := ann.KVs["after"]
+				if !ok {
+					return nil, fmt.Errorf("%s:%s: @%s on parameter %q is missing required key `after`", source, ann.Pos, annKunaiLayout, prm.VarName)
+				}
+				if afterVal.Kind != p4lite.AnnotationIdent {
+					return nil, fmt.Errorf("%s:%s: @%s.after must be an identifier (got %v)", source, ann.Pos, annKunaiLayout, afterVal.Kind)
+				}
+				if !prm.IsOut || !prm.IsArray {
+					return nil, fmt.Errorf("%s:%s: @%s only applies to `out X[N] name` parameters (got %q)", source, ann.Pos, annKunaiLayout, prm.VarName)
+				}
+				if _, exists := out[prm.VarName]; exists {
+					return nil, fmt.Errorf("%s:%s: parameter %q has multiple @%s annotations", source, ann.Pos, prm.VarName, annKunaiLayout)
+				}
+				out[prm.VarName] = &StackLayoutSpec{After: afterVal.Ident}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// resolveStackLayouts fills BaseByteOff on each StackLayoutSpec. Must
+// run after primary header bit width is known. `after=primary` is the
+// only currently-supported anchor; future chained forms
+// (`after=<other_stack>`) will walk dependencies here.
+func resolveStackLayouts(spec *ProtocolSpec) error {
+	if len(spec.StackLayouts) == 0 {
+		return nil
+	}
+	primaryBits := SumBits(spec.Fields)
+	if primaryBits%8 != 0 {
+		return fmt.Errorf("%s: primary header of %q is %d bits (not byte-aligned); cannot resolve @kunai_layout base", spec.Source, spec.Name, primaryBits)
+	}
+	primaryBytes := primaryBits / 8
+	for name, layout := range spec.StackLayouts {
+		switch layout.After {
+		case stackLayoutAfterPrimary:
+			layout.BaseByteOff = primaryBytes
+		default:
+			return fmt.Errorf("%s: @kunai_layout on %q references unsupported anchor %q (only %q is implemented in MVP; chained `after=<stack>` is reserved for future work)", spec.Source, name, layout.After, stackLayoutAfterPrimary)
+		}
+	}
+	return nil
+}
+
+// validateDeclareOnlyStacks ensures every top-level declare-only aux
+// stack carries a @kunai_layout annotation. "Top-level" excludes
+// owner-bound stacks (e.g. TCP SACK blocks, IPv4 RR addrs) — those are
+// reached via 5-part option-walk paths whose resolver uses the option
+// dispatch's slot prelude for the base, not stackBaseOffsetInLayer.
+// Only stacks queried via the 3-part `<proto>.<stack>[N].<field>`
+// path are at risk of aliasing in resolveStackLayouts/where.go, so the
+// annotation requirement is scoped to them.
+func validateDeclareOnlyStacks(spec *ProtocolSpec) error {
+	if spec.File == nil {
+		return nil
+	}
+	pushed := pushedStackNames(spec)
+	owned := ownerBoundStackNames(spec)
+	for _, par := range spec.File.Parsers {
+		for _, prm := range par.Params {
+			if !prm.IsOut || !prm.IsArray {
+				continue
+			}
+			if pushed[prm.VarName] || owned[prm.VarName] {
+				continue
+			}
+			if spec.StackLayouts == nil || spec.StackLayouts[prm.VarName] == nil {
+				return fmt.Errorf("%s:%s: top-level declare-only aux stack %q has no @kunai_layout annotation (required so multiple un-pushed stacks don't alias onto the same byte offset; use @kunai_layout[after=primary] for SRv6-style segment lists)", spec.Source, prm.Pos, prm.VarName)
+			}
+		}
+	}
+	return nil
+}
+
+func pushedStackNames(spec *ProtocolSpec) map[string]bool {
+	out := make(map[string]bool)
+	if spec.ParseStateMachine == nil {
+		return out
+	}
+	for _, st := range spec.ParseStateMachine.States {
+		for _, ex := range st.Extracts {
+			if ex.IsStackPush {
+				out[ex.StackName] = true
+			}
+		}
+	}
+	return out
+}
+
+func ownerBoundStackNames(spec *ProtocolSpec) map[string]bool {
+	out := make(map[string]bool)
+	if spec.ParseStateMachine == nil {
+		return out
+	}
+	for name, stack := range spec.ParseStateMachine.StackRefs {
+		if stack.OwnerOption != "" {
+			out[name] = true
+		}
+	}
+	return out
+}
 
 // readParserOptionSegment scans the parser block's @-decorators for
 // @kunai_option_segment[name=IDENT]. Returns the declared segment

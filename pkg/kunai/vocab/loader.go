@@ -117,6 +117,10 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 	if optionSegment == "" {
 		optionSegment = "options"
 	}
+	stackLayouts, err := readParserParamLayouts(file, p)
+	if err != nil {
+		return nil, err
+	}
 	spec := &ProtocolSpec{
 		Name:              protoName,
 		HeaderName:        primary.Name,
@@ -128,9 +132,16 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 		FlagsByteOffset:   flagsOff,
 		ParseStateMachine: machine,
 		HeaderAnnotations: headerAnnotations,
+		StackLayouts:      stackLayouts,
 		OptionSegment:     optionSegment,
 		File:              file,
 		Source:            p,
+	}
+	if err := resolveStackLayouts(spec); err != nil {
+		return nil, err
+	}
+	if err := validateDeclareOnlyStacks(spec); err != nil {
+		return nil, err
 	}
 	if res.ChainEnd != nil {
 		// Validate the field exists in the primary header now; the

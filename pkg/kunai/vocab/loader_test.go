@@ -771,6 +771,53 @@ func TestParseStateMachineSrv6(t *testing.T) {
 	}
 }
 
+// TestSRv6SegmentsLayoutAnnotation pins that the SRv6 segments aux
+// stack (= the bundled Mode B / declare-only example) resolves its
+// base byte offset from the parser-parameter @kunai_layout decorator
+// rather than the legacy implicit "primary directly after" fallback.
+func TestSRv6SegmentsLayoutAnnotation(t *testing.T) {
+	specs := loadBundled(t)
+	srv6 := specs["srv6"]
+	if srv6 == nil {
+		t.Fatal("missing srv6 spec")
+	}
+	layout, ok := srv6.StackLayouts["segments"]
+	if !ok || layout == nil {
+		t.Fatal("srv6.StackLayouts[segments] missing — @kunai_layout not consumed")
+	}
+	if layout.After != "primary" {
+		t.Errorf("layout.After = %q, want primary", layout.After)
+	}
+	if layout.BaseByteOff != 8 {
+		t.Errorf("layout.BaseByteOff = %d, want 8 (= sizeof(srv6_h) primary)", layout.BaseByteOff)
+	}
+}
+
+// TestDeclareOnlyStackRequiresLayoutAnnotation pins that a top-level
+// declare-only aux stack without @kunai_layout fails at load time,
+// preventing the historical alias bug where multiple un-annotated
+// stacks would collapse onto the same byte offset.
+func TestDeclareOnlyStackRequiresLayoutAnnotation(t *testing.T) {
+	src := `header foo_h { bit<8> a; bit<8> b; }
+header seg_h { bit<128> addr; }
+parser P(packet_in pkt,
+         out foo_h hdr,
+         out seg_h[8] segments) {
+	state start {
+		pkt.extract(hdr);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected error for un-annotated declare-only stack, got nil")
+	}
+	if !strings.Contains(err.Error(), "@kunai_layout") {
+		t.Errorf("error %q should mention @kunai_layout", err.Error())
+	}
+}
+
 // TestIPv6ExtHeaderAnnotations pins the kunai-specific annotations
 // on ipv6_ext_h: the variable-trail params and the writeback resolve
 // ipv6.next_header to byte offset 6 so the chain tail's next_header
@@ -1379,7 +1426,10 @@ header seg_h { bit<128> addr; }
 
 const bit<8> FOO_IPV6_NEXT_HEADER = 43;
 
-parser P(packet_in pkt, out foo_h hdr, out seg_h[8] segments) {
+parser P(packet_in pkt,
+         out foo_h hdr,
+         @kunai_layout[after=primary]
+         out seg_h[8] segments) {
 	state start {
 		pkt.extract(hdr);
 		transition select(hdr.rt_type) {

@@ -56,6 +56,15 @@ type ProtocolSpec struct {
 	// here when it carries cross-cutting kunai metadata that the
 	// dispatch-const / parser-block channels can't express.
 	HeaderAnnotations map[string]*HeaderAnnotations
+	// StackLayouts captures the @kunai_layout annotation on each
+	// declare-only `out X[N] stack` parser parameter. The resolver
+	// uses these to compute aux-stack base offsets when the parser
+	// block doesn't push entries explicitly — without an explicit
+	// layout declaration, multiple declare-only stacks would alias
+	// onto the same byte offset. Keyed by stack (parameter) name.
+	// Empty when every aux stack in the protocol is pushed by some
+	// parser-block state (= the standard P4 idiom).
+	StackLayouts map[string]*StackLayoutSpec
 	// OptionSegment names the reserved second path segment for 4-/5-part
 	// field references like `<proto>.<seg>.<NAME>.<field>` that route to
 	// the protocol's parser-declared option walk. Defaults to "options"
@@ -72,6 +81,19 @@ type ProtocolSpec struct {
 	selfValidating bool
 	File           *p4lite.File // full AST (for resolver/codegen later)
 	Source         string       // original file path, for diagnostics
+}
+
+// StackLayoutSpec captures the @kunai_layout[after=...] decorator on
+// a parser parameter declaring an aux stack that the parser block
+// does not extract into. The byte offset is computed by resolving the
+// chain: `after=primary` anchors at the primary header end;
+// `after=<other_stack>` walks back to a previously-resolved layout
+// (cycle-free by construction since the loader processes parameters
+// in declaration order and rejects forward references). The resolved
+// BaseByteOff is what the field-path resolver consumes.
+type StackLayoutSpec struct {
+	After       string // "primary" or another stack's parameter name
+	BaseByteOff int    // resolved at load-time
 }
 
 // HeaderAnnotations bundles kunai-specific decorators carried on a

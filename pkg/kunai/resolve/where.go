@@ -587,13 +587,16 @@ func stackBaseOffsetInLayer(spec *vocab.ProtocolSpec, stackName string, fp *ast.
 	if offset >= 0 {
 		return offset, nil
 	}
-	// No state pushes the stack: the stack lives in the protocol's
-	// variable trail and starts immediately after the primary header.
-	primaryBits := vocab.SumBits(spec.Fields)
-	if primaryBits%8 != 0 {
-		return 0, errorf(fp.Pos, "primary header of %q is %d bits (not byte-aligned); cannot locate stack %q", spec.Name, primaryBits, stackName)
+	// No state pushes the stack: the spec must carry a @kunai_layout
+	// annotation that anchored the base at load-time. Otherwise the
+	// vocab loader's validateDeclareOnlyStacks would have rejected
+	// the spec — reaching here without an entry would be a loader
+	// bug, so error loudly rather than fall back to a possibly-
+	// aliased "after primary" guess.
+	if layout, ok := spec.StackLayouts[stackName]; ok {
+		return layout.BaseByteOff, nil
 	}
-	return primaryBits / 8, nil
+	return 0, errorf(fp.Pos, "stack %q in protocol %q has no @kunai_layout annotation; declare-only aux stacks queried via the 3-part top-level path need an explicit base anchor", stackName, spec.Name)
 }
 
 // resolveStackIndex turns an ast.IndexExpr into ir.StackIndex,

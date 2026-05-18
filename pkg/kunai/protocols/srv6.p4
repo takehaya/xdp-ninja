@@ -38,6 +38,7 @@ const bit<8> SRV6_IPV6_NEXT_HEADER = 43;
 
 parser SRv6Parser(packet_in pkt,
                     out srv6_h        hdr,
+                    @kunai_layout[after=primary]
                     out srv6_seg_h[8] segments) {
     state start {
         pkt.extract(hdr);

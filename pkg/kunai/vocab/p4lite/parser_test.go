@@ -1026,6 +1026,48 @@ header ipv6_ext_h { bit<8> next_header; bit<8> hdr_ext_len; }`
 	}
 }
 
+func TestParseAnnotationOnParserParam(t *testing.T) {
+	src := `header foo_h { bit<8> a; }
+header bar_h { bit<128> b; }
+parser P(packet_in pkt,
+         out foo_h hdr,
+         @kunai_layout[after=primary]
+         out bar_h[8] segments) {
+	state start {
+		pkt.extract(hdr);
+		transition accept;
+	}
+}`
+	f, err := Parse([]byte(src), "t.p4")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Parsers) != 1 || len(f.Parsers[0].Params) != 3 {
+		t.Fatalf("params=%d, want 3", len(f.Parsers[0].Params))
+	}
+	segParam := f.Parsers[0].Params[2]
+	if segParam.VarName != "segments" {
+		t.Fatalf("params[2].VarName=%q, want segments", segParam.VarName)
+	}
+	if len(segParam.Annotations) != 1 {
+		t.Fatalf("segments annotations=%d, want 1", len(segParam.Annotations))
+	}
+	ann := segParam.Annotations[0]
+	if ann.Name != "kunai_layout" {
+		t.Errorf("annotation name=%q, want kunai_layout", ann.Name)
+	}
+	after, ok := ann.KVs["after"]
+	if !ok {
+		t.Fatal("kunai_layout missing `after` key")
+	}
+	if after.Kind != AnnotationIdent || after.Ident != "primary" {
+		t.Errorf("after = %+v, want ident primary", after)
+	}
+	if len(f.Parsers[0].Params[0].Annotations) != 0 || len(f.Parsers[0].Params[1].Annotations) != 0 {
+		t.Errorf("non-annotated params carry stray annotations: %+v", f.Parsers[0].Params)
+	}
+}
+
 func TestParseAnnotationOnConstAndParser(t *testing.T) {
 	src := `@kunai_dispatch[order=1]
 const bit<8> FOO_TCP = 6;

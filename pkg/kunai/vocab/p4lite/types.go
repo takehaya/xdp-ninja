@@ -174,17 +174,20 @@ type CounterInst struct {
 }
 
 // Param is one entry in a parser's parameter list, e.g. `packet_in
-// pkt`, `out H hdr`, or `out H[8] stack`.
+// pkt`, `out H hdr`, or `out H[8] stack`. Annotations decorate the
+// parameter itself; today the only consumer is the @kunai_layout
+// loader pass on declare-only aux stacks.
 //
 // BNF: parameter (P4-16 Section 6.8 "Calling convention: call by copy in/out")
 type Param struct {
-	IsPacketIn bool
-	IsOut      bool
-	TypeName   string
-	IsArray    bool
-	ArraySize  int
-	VarName    string
-	Pos        Position
+	IsPacketIn  bool
+	IsOut       bool
+	TypeName    string
+	IsArray     bool
+	ArraySize   int
+	VarName     string
+	Annotations []Annotation
+	Pos         Position
 }
 
 // State is one `state name { stmts; transition ...; }` block.
