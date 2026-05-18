@@ -790,8 +790,8 @@ func TestSRv6SegmentsStackCount(t *testing.T) {
 	if cnt.ByteOff != 4 {
 		t.Errorf("ByteOff = %d, want 4 (= byte position of srv6_h.last_entry)", cnt.ByteOff)
 	}
-	if cnt.Offset != 1 {
-		t.Errorf("Offset = %d, want 1 (= last_entry + 1 SRv6 spec formula)", cnt.Offset)
+	if cnt.Addend != 1 {
+		t.Errorf("Addend = %d, want 1 (= last_entry + 1 SRv6 spec formula)", cnt.Addend)
 	}
 }
 

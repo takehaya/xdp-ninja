@@ -449,7 +449,7 @@ func stackCountSource(w *ir.Condition) (*quantCountSource, error) {
 		return &quantCountSource{
 			Layer:   iterRef.Layer,
 			ByteOff: cnt.ByteOff,
-			Offset:  cnt.Offset,
+			Offset:  cnt.Addend,
 		}, nil
 	}
 	// No @kunai_stack_count → caller unrolls over the static Capacity.

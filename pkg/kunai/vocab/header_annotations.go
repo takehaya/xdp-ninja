@@ -298,7 +298,7 @@ func readParserParamCounts(file *p4lite.File, primaryFields []Field, source stri
 				}
 				out[prm.VarName] = &StackCountSpec{
 					ByteOff: bitOff / 8,
-					Offset:  offset,
+					Addend:  offset,
 				}
 			}
 		}
