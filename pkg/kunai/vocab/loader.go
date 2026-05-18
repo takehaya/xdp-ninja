@@ -121,6 +121,10 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	stackCounts, err := readParserParamCounts(file, fields, p)
+	if err != nil {
+		return nil, err
+	}
 	spec := &ProtocolSpec{
 		Name:              protoName,
 		HeaderName:        primary.Name,
@@ -133,6 +137,7 @@ func loadFile(fsys fs.FS, p string) (*ProtocolSpec, error) {
 		ParseStateMachine: machine,
 		HeaderAnnotations: headerAnnotations,
 		StackLayouts:      stackLayouts,
+		StackCounts:       stackCounts,
 		OptionSegment:     optionSegment,
 		File:              file,
 		Source:            p,

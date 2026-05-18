@@ -771,6 +771,105 @@ func TestParseStateMachineSrv6(t *testing.T) {
 	}
 }
 
+// TestSRv6SegmentsStackCount pins that the SRv6 segments aux stack
+// resolves its runtime iteration count from the @kunai_stack_count
+// annotation on the parser parameter (= byte 4 of srv6_h, the
+// last_entry field, plus 1 per the SRv6 spec).
+func TestSRv6SegmentsStackCount(t *testing.T) {
+	specs := loadBundled(t)
+	srv6 := specs["srv6"]
+	if srv6 == nil {
+		t.Fatal("missing srv6 spec")
+	}
+	cnt, ok := srv6.StackCounts["segments"]
+	if !ok || cnt == nil {
+		t.Fatal("srv6.StackCounts[segments] missing — @kunai_stack_count not consumed")
+	}
+	// srv6_h layout: next_header(8) + hdr_ext_len(8) + routing_type(8)
+	// + segments_left(8) + last_entry(8) ...  → last_entry at byte 4.
+	if cnt.ByteOff != 4 {
+		t.Errorf("ByteOff = %d, want 4 (= byte position of srv6_h.last_entry)", cnt.ByteOff)
+	}
+	if cnt.Offset != 1 {
+		t.Errorf("Offset = %d, want 1 (= last_entry + 1 SRv6 spec formula)", cnt.Offset)
+	}
+}
+
+// TestStackCountUnknownField pins that @kunai_stack_count[field=X]
+// errors at load time when X is not a primary-header field name.
+func TestStackCountUnknownField(t *testing.T) {
+	src := `header foo_h { bit<8> a; bit<8> b; }
+header seg_h { bit<128> addr; }
+parser P(packet_in pkt,
+         out foo_h hdr,
+         @kunai_layout[after=primary]
+         @kunai_stack_count[field=does_not_exist, offset=0]
+         out seg_h[8] segments) {
+	state start {
+		pkt.extract(hdr);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected unknown-field error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("error %q should mention unknown field", err.Error())
+	}
+}
+
+// TestStackCountNonByteAlignedField pins that @kunai_stack_count rejects
+// a field that isn't a byte-aligned 8-bit slot, since the codegen
+// emits a single-byte LDX for the count load.
+func TestStackCountNonByteAlignedField(t *testing.T) {
+	src := `header foo_h { bit<4> high; bit<4> low; }
+header seg_h { bit<128> addr; }
+parser P(packet_in pkt,
+         out foo_h hdr,
+         @kunai_layout[after=primary]
+         @kunai_stack_count[field=high]
+         out seg_h[8] segments) {
+	state start {
+		pkt.extract(hdr);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected byte-alignment error, got nil")
+	}
+	if !strings.Contains(err.Error(), "byte-aligned") {
+		t.Errorf("error %q should mention byte-aligned", err.Error())
+	}
+}
+
+// TestStackCountOnNonArrayParam pins that @kunai_stack_count rejects
+// non-array parameters — the count semantic only makes sense for
+// `out X[N] name`, not for a single header `out X name`.
+func TestStackCountOnNonArrayParam(t *testing.T) {
+	src := `header foo_h { bit<8> a; bit<8> b; }
+parser P(packet_in pkt,
+         out foo_h hdr,
+         @kunai_stack_count[field=b]
+         out foo_h other) {
+	state start {
+		pkt.extract(hdr);
+		transition accept;
+	}
+}`
+	fsys := fstest.MapFS{"vocab/foo.p4": &fstest.MapFile{Data: []byte(src)}}
+	_, err := Load(fsys, "vocab")
+	if err == nil {
+		t.Fatal("expected non-array-param error, got nil")
+	}
+	if !strings.Contains(err.Error(), "out X[N] name") {
+		t.Errorf("error %q should mention `out X[N] name`", err.Error())
+	}
+}
+
 // TestSRv6SegmentsLayoutAnnotation pins that the SRv6 segments aux
 // stack (= the bundled Mode B / declare-only example) resolves its
 // base byte offset from the parser-parameter @kunai_layout decorator

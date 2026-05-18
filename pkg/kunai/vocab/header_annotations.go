@@ -14,6 +14,7 @@ const (
 	annKunaiWriteback    = "kunai_writeback"
 	annKunaiOptionSeg    = "kunai_option_segment"
 	annKunaiLayout       = "kunai_layout"
+	annKunaiStackCount   = "kunai_stack_count"
 )
 
 // stackLayoutAfterPrimary is the magic identifier the @kunai_layout
@@ -238,6 +239,71 @@ func ownerBoundStackNames(spec *ProtocolSpec) map[string]bool {
 		}
 	}
 	return out
+}
+
+// stackCountAllowedKeys is the @kunai_stack_count key set, hoisted to
+// package scope so the no-annotation common case (= every protocol
+// except srv6 today) doesn't allocate a transient map per loadFile.
+var stackCountAllowedKeys = map[string]bool{"field": true, "offset": true}
+
+// readParserParamCounts lowers each @kunai_stack_count decorator on a
+// parser parameter into a StackCountSpec keyed by parameter name.
+// The annotation names a primary-header field whose byte value (plus
+// an optional integer offset) gives the stack's runtime element count
+// for `any/all` quantifiers. Resolution requires the primary header's
+// field layout, so the caller supplies the parsed `[]Field` slice.
+func readParserParamCounts(file *p4lite.File, primaryFields []Field, source string) (map[string]*StackCountSpec, error) {
+	if file == nil {
+		return nil, nil
+	}
+	var out map[string]*StackCountSpec
+	for _, par := range file.Parsers {
+		for _, prm := range par.Params {
+			for _, ann := range prm.Annotations {
+				if ann.Name != annKunaiStackCount {
+					continue
+				}
+				if err := requireKnownKeys(ann, stackCountAllowedKeys, source); err != nil {
+					return nil, err
+				}
+				if !prm.IsOut || !prm.IsArray {
+					return nil, fmt.Errorf("%s:%s: @%s only applies to `out X[N] name` parameters (got %q)", source, ann.Pos, annKunaiStackCount, prm.VarName)
+				}
+				fieldVal, ok := ann.KVs["field"]
+				if !ok {
+					return nil, fmt.Errorf("%s:%s: @%s on parameter %q is missing required key `field`", source, ann.Pos, annKunaiStackCount, prm.VarName)
+				}
+				if fieldVal.Kind != p4lite.AnnotationIdent {
+					return nil, fmt.Errorf("%s:%s: @%s.field must be an identifier (got %v)", source, ann.Pos, annKunaiStackCount, fieldVal.Kind)
+				}
+				bitOff, bits, found := BitOffsetIn(primaryFields, fieldVal.Ident)
+				if !found {
+					return nil, fmt.Errorf("%s:%s: @%s.field references unknown field %q in primary header", source, ann.Pos, annKunaiStackCount, fieldVal.Ident)
+				}
+				if bits != 8 || bitOff%8 != 0 {
+					return nil, fmt.Errorf("%s:%s: @%s.field %q must be a byte-aligned 8-bit field (got bit offset %d, %d bits wide)", source, ann.Pos, annKunaiStackCount, fieldVal.Ident, bitOff, bits)
+				}
+				offset := 0
+				if oVal, ok := ann.KVs["offset"]; ok {
+					if oVal.Kind != p4lite.AnnotationInt {
+						return nil, fmt.Errorf("%s:%s: @%s.offset must be an int literal", source, ann.Pos, annKunaiStackCount)
+					}
+					offset = int(oVal.Int)
+				}
+				if _, exists := out[prm.VarName]; exists {
+					return nil, fmt.Errorf("%s:%s: parameter %q has multiple @%s annotations", source, ann.Pos, prm.VarName, annKunaiStackCount)
+				}
+				if out == nil {
+					out = make(map[string]*StackCountSpec)
+				}
+				out[prm.VarName] = &StackCountSpec{
+					ByteOff: bitOff / 8,
+					Offset:  offset,
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // readParserOptionSegment scans the parser block's @-decorators for

@@ -65,6 +65,13 @@ type ProtocolSpec struct {
 	// Empty when every aux stack in the protocol is pushed by some
 	// parser-block state (= the standard P4 idiom).
 	StackLayouts map[string]*StackLayoutSpec
+	// StackCounts captures the @kunai_stack_count annotation on a
+	// declare-only aux stack parameter, naming a primary-header byte
+	// whose value (plus an optional offset) gives the stack's runtime
+	// element count for `any/all` quantifiers. Empty when no parameter
+	// carries the annotation; the codegen then falls back to the
+	// static Capacity bound.
+	StackCounts map[string]*StackCountSpec
 	// OptionSegment names the reserved second path segment for 4-/5-part
 	// field references like `<proto>.<seg>.<NAME>.<field>` that route to
 	// the protocol's parser-declared option walk. Defaults to "options"
@@ -94,6 +101,19 @@ type ProtocolSpec struct {
 type StackLayoutSpec struct {
 	After       string // "primary" or another stack's parameter name
 	BaseByteOff int    // resolved at load-time
+}
+
+// StackCountSpec is the .p4-declared form the codegen's quantifier
+// count source consumes for top-level declare-only aux stacks. The
+// loader resolves the @kunai_stack_count[field=NAME, offset=N]
+// annotation against the primary header's bit layout into the byte
+// offset of the named field; the codegen emits a single-byte LDX
+// from `layer_entry + CountByteOff`, adds Offset, and uses the
+// result as the iteration cap. The field must be byte-aligned and
+// exactly 8 bits wide so the LDX hits the whole value in one load.
+type StackCountSpec struct {
+	ByteOff int
+	Offset  int
 }
 
 // HeaderAnnotations bundles kunai-specific decorators carried on a
