@@ -459,6 +459,8 @@ for f in path.pcap.cpu*; do echo "$(basename $f): $(tcpdump -r $f 2>/dev/null | 
 | `--fast-reader` | off | mmap+atomic 直叩きの fastrb reader を使う。 cilium/ebpf の generic reader より低 CPU、 高 throughput |
 | `--no-wakeup` | off | `BPF_RB_NO_WAKEUP` を全 submit に立てる。 reader 側 epoll wake が無くなり throughput up、 **代わりに p50 latency が 100µs → ~2.6ms に悪化** (1ms polling 床)。 `--fast-reader` 必須 |
 | `--observer-prefetch` | off | filter scratch を 512 B 強制。 R12 の ice driver で L1-dcache prefetch が効くケースに opt-in |
+| `--rx-cores N` | 0 (off) | split-core capture。 RX/capture が core `0..N-1` に閉じている前提で（利用者が `ethtool -L combined N` で NIC queue 数を N にする）、 consumer goroutine を core `N..2N-1` に pin し RX softirq から分離する。 `-w` 出力時の producer-consumer 結合を断ち、 32/32 split で capture rate +30%。 `--fast-reader` 必須、 `--busy-poll --no-wakeup` と併用 |
+| `--busy-poll` | off | fastrb shard を `epoll_wait` で寝かさず `ReadBatch` で spin させる。 consumer が常時 drain するので wake 不要。 shard ごとに 1 core 消費。 `--fast-reader` 必須、 `--no-wakeup` と対 |
 | `--in-memory-buffer MB` | 0 (off) | raw-dump 出力先を mmap 上の `MAP_POPULATE` バッファに置く。 NVMe write が bottleneck な時に隠せる |
 | `--null-output` | off | bench 用。 出力 file を一切開かず、 reader の CPU コストだけ測る |
 | `--latency-sample-period N` | 0 (off) | N packet ごとに 1 サンプル、 BPF→reader latency (ns 単位) を tsv に蓄積 |
@@ -472,6 +474,10 @@ flag 同士の組合せメモ:
   wake で永久ブロックする
 - `--in-memory-buffer` は `--raw-dump` の時のみ意味あり (pcap-ng path には未対応)
 - `--rx-hwts` は `--mode xdp` only。 entry/exit (fentry/fexit) では使えない
+- `--rx-cores` は NIC queue 数を手で変える運用前提。 `ethtool -L combined N` は
+  **ドライバが安定してから**実行すること。 `modprobe` 直後（初期化未完了）に叩くと
+  ice 等が RTNL を握ったまま D-state デッドロックし、 udev / dmesg など box 全体に
+  波及する（reboot 必須）。 split-core を使わないなら queue 数はいじらなくてよい
 - `--snaplen 0` (CLI 既定) はバイパスを意味する。 強制 0B にしたい場合は
   `capture absolute 0` を DSL 側で書く
 
