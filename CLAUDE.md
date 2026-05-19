@@ -97,6 +97,7 @@ DSL の設計 / 内部ドキュメントは `docs/ja/` に集約。
 - ユーザー向け CLI ガイド: `docs/ja/dsl-usage.md`
 - 残課題リスト: `docs/ja/dsl-followups.md` (ローカルのみ・git untracked — clone には含まれない)
 - ベンチ方法論: `docs/ja/dsl-benchmark.md`
+- 性能チューニングガイド: `docs/ja/tuning.md`
 
 <!-- OCR:START -->
 ## Open Code Review Instructions
