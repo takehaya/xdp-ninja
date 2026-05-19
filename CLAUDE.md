@@ -95,7 +95,7 @@ DSL の設計 / 内部ドキュメントは `docs/ja/` に集約。
 - 言語仕様 (Part I 型システム + Part II 抽象構文 / typing rule / 操作的意味論): `docs/ja/dsl-types.md`
 - internals (アーキテクチャ / パッケージ別ツアー / コードリーディングマップ / codegen ABI / vocab 著者ガイド / P4-16 互換性 / レビューチェックリスト): `docs/ja/dsl-internals.md`
 - ユーザー向け CLI ガイド: `docs/ja/dsl-usage.md`
-- 残課題リスト: `docs/ja/dsl-followups.md`
+- 残課題リスト: `docs/ja/dsl-followups.md` (ローカルのみ・git untracked — clone には含まれない)
 - ベンチ方法論: `docs/ja/dsl-benchmark.md`
 
 <!-- OCR:START -->
