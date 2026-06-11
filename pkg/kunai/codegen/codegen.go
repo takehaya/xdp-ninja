@@ -473,8 +473,14 @@ func emitFieldDispatchCheck(
 // fixed parent, or the parent's layer-entry slot value for a
 // parser-machine parent — loaded by the caller). byteOff is the
 // field's offset relative to that base and may be negative (reading
-// back into the parent header). scalar/dst are caller-provided
-// scratch registers, both distinct from offsetReg, R0 and R1.
+// back into the parent header).
+//
+// Register constraints: scalar receives the folded offset and stays
+// live across the load, so it must differ from offsetReg, dst, R0 and
+// R1. dst is written only by the bounded load, after the fold has
+// already consumed offsetReg, so dst MAY alias offsetReg (the
+// variable-parent caller does exactly this to free a register) but
+// must differ from scalar, R0 and R1.
 func emitFieldDispatchCheckBounded(
 	spec *vocab.ProtocolSpec,
 	c *vocab.DispatchConst,
