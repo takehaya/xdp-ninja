@@ -209,6 +209,7 @@ func (r *resolver) findQuantTarget(c *ir.Condition, pos ast.Position) (*ir.Quant
 	}
 	a := found.Aux
 	return &ir.QuantTarget{
+		Layer:         found.Layer,
 		OutParam:      a.OutParam,
 		HeaderName:    a.HeaderName,
 		OffsetInLayer: a.OffsetInLayer,
