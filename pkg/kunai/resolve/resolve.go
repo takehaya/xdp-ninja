@@ -176,6 +176,12 @@ func addChainRootWarning(p *ir.Program, f *ast.Filter) {
 // into the same slot — codegen's per-alt advance logic guarantees
 // whichever alt matched is the one whose R4 entry was just stored.
 func markRuntimeOffsetLayers(p *ir.Program) {
+	// A layer makes every later layer's start offset runtime-variable
+	// when it is a heterogeneous-size alternation or has a variable-
+	// length body (parser-machine trailer / pkt.advance skip).
+	isRuntimeBoundary := func(l *ir.LayerInstance) bool {
+		return ir.IsHeterogeneousAlt(l) || (l.Spec != nil && l.Spec.HasVariableLayout())
+	}
 	boundary := -1
 	for i, l := range p.Layers {
 		if l == nil {
@@ -187,11 +193,11 @@ func markRuntimeOffsetLayers(p *ir.Program) {
 				alt.LayerPos = i
 			}
 		}
-		// The earliest layer whose size is runtime-variable is the
-		// boundary: every later layer's start offset is then runtime,
-		// so downstream where/capture reads must address through the
-		// per-layer entry slot instead of a compile-time prefix.
-		if boundary == -1 && (ir.IsHeterogeneousAlt(l) || (l.Spec != nil && l.Spec.HasVariableLayout())) {
+		// The earliest runtime boundary fixes the point past which every
+		// later layer's start offset is runtime, so downstream where /
+		// capture reads must address through the per-layer entry slot
+		// instead of a compile-time prefix.
+		if boundary == -1 && isRuntimeBoundary(l) {
 			boundary = i
 		}
 	}
