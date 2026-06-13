@@ -173,11 +173,16 @@ func (r *resolver) resolveWhere(w *ast.WhereExpr) (*ir.Condition, error) {
 // `addr == X or addr == Y`). Indexed refs and primary fields stay
 // constant within the iteration. Zero iterator refs, or refs to two
 // distinct stacks (which would demand two iteration dimensions), are
-// rejected here so the error carries position info; codegen's
-// rebindFieldRef re-checks the single-stack invariant as
-// defense-in-depth.
+// rejected here so the error carries position info.
+//
+// Stack identity is (owning layer, out param), not the out param
+// alone: distinct protocols can expose a stack under the same name
+// (ipv6 and gtp both declare `out ... exts`), so `any(ipv6.exts... or
+// gtp.exts...)` is two iteration dimensions despite sharing the
+// "exts" out param. The owning layer must therefore be part of the
+// comparison.
 func (r *resolver) findQuantTarget(c *ir.Condition, pos ast.Position) (*ir.QuantTarget, error) {
-	var found *ir.AuxRef
+	var found *ir.FieldRef
 	multiple := false
 	ir.WalkConditionFieldRefs(c, func(ref *ir.FieldRef) {
 		if ref == nil || ref.Aux == nil || ref.Aux.Stack == nil {
@@ -191,8 +196,8 @@ func (r *resolver) findQuantTarget(c *ir.Condition, pos ast.Position) (*ir.Quant
 			return
 		}
 		if found == nil {
-			found = ref.Aux
-		} else if ref.Aux.OutParam != found.OutParam {
+			found = ref
+		} else if ref.Layer != found.Layer || ref.Aux.OutParam != found.Aux.OutParam {
 			multiple = true
 		}
 	})
@@ -202,12 +207,13 @@ func (r *resolver) findQuantTarget(c *ir.Condition, pos ast.Position) (*ir.Quant
 	if multiple {
 		return nil, errorf(pos, "any/all iterates a single aux header stack, but the inner expression references more than one (the same stack may be referenced multiple times, but not two different stacks)")
 	}
+	a := found.Aux
 	return &ir.QuantTarget{
-		OutParam:      found.OutParam,
-		HeaderName:    found.HeaderName,
-		OffsetInLayer: found.OffsetInLayer,
-		ElemSize:      found.HeaderSize,
-		Capacity:      found.Stack.Capacity,
+		OutParam:      a.OutParam,
+		HeaderName:    a.HeaderName,
+		OffsetInLayer: a.OffsetInLayer,
+		ElemSize:      a.HeaderSize,
+		Capacity:      a.Stack.Capacity,
 	}, nil
 }
 
