@@ -17,6 +17,7 @@ package resolve
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/takehaya/xdp-ninja/pkg/kunai/ast"
 	"github.com/takehaya/xdp-ninja/pkg/kunai/ir"
@@ -178,9 +179,17 @@ func addChainRootWarning(p *ir.Program, f *ast.Filter) {
 func markRuntimeOffsetLayers(p *ir.Program) {
 	// A layer makes every later layer's start offset runtime-variable
 	// when it is a heterogeneous-size alternation or has a variable-
-	// length body (parser-machine trailer / pkt.advance skip).
+	// length body (parser-machine trailer / pkt.advance skip). A
+	// uniform-size alt group is not heterogeneous, but a member with a
+	// variable-length body still shifts post-alt offsets on the branch
+	// that matches it (e.g. `(vxlan|geneve)` — both 8-byte fixed, but
+	// geneve carries an opt_len-driven options trailer), so the alt
+	// members are checked too.
+	hasVarBody := func(l *ir.LayerInstance) bool {
+		return l != nil && l.Spec != nil && l.Spec.HasVariableLayout()
+	}
 	isRuntimeBoundary := func(l *ir.LayerInstance) bool {
-		return ir.IsHeterogeneousAlt(l) || (l.Spec != nil && l.Spec.HasVariableLayout())
+		return ir.IsHeterogeneousAlt(l) || hasVarBody(l) || slices.ContainsFunc(l.Alternation, hasVarBody)
 	}
 	boundary := -1
 	for i, l := range p.Layers {

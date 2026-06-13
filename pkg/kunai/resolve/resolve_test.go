@@ -429,6 +429,29 @@ func TestResolveMarksRuntimeOffsetForLayersPastHetAlt(t *testing.T) {
 	}
 }
 
+func TestResolveMarksRuntimeOffsetForVariableLayoutAltMember(t *testing.T) {
+	// `eth/ipv4/udp/(vxlan|geneve)/eth/ipv4@inner/tcp where inner.dst`
+	// — vxlan and geneve share the 8-byte fixed size, so the alt is NOT
+	// heterogeneous, but geneve carries an opt_len-driven options
+	// trailer. The alt is therefore a runtime-offset boundary on the
+	// geneve branch, so the inner ipv4 read by the where clause must be
+	// marked NeedsRuntimeOffset.
+	p := resolveOK(t, "eth/ipv4/udp/(vxlan|geneve)/eth/ipv4@inner/tcp where inner.dst == 10.0.0.1", nil)
+	var sawInner bool
+	for _, l := range p.Layers {
+		if l.Label != "inner" {
+			continue
+		}
+		sawInner = true
+		if !l.NeedsRuntimeOffset {
+			t.Error("inner ipv4 SHOULD need runtime offset (alt member geneve has a variable-length options trailer)")
+		}
+	}
+	if !sawInner {
+		t.Fatal("inner ipv4 layer (@inner) not found in resolved chain")
+	}
+}
+
 func TestResolveUniformAltIsNotRuntimeOffsetBoundary(t *testing.T) {
 	// `eth/(vlan|qinq)/ipv4/tcp where tcp.dport == 443` — the alt is
 	// uniform-size (4 bytes each), so it is NOT a runtime-offset
