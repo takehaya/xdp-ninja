@@ -159,8 +159,14 @@ func addChainRootWarning(p *ir.Program, f *ast.Filter) {
 
 // markRuntimeOffsetLayers populates LayerPos on every layer (including
 // alt members) and sets NeedsRuntimeOffset on layers whose runtime
-// position cannot be computed via the static-prefix path because a
-// heterogeneous-size alternation group sits earlier in the chain.
+// position cannot be computed via the static-prefix path because an
+// earlier layer has a runtime-variable size. Two things make a layer's
+// size runtime-variable: a heterogeneous-size alternation group, or a
+// variable-length layer body (parser-machine trailer / pkt.advance
+// skip — ipv4 options, gtp opt/exts, ipv6 exts, srv6 segments, geneve
+// options). Either one shifts every later layer's start offset by a
+// runtime amount.
+//
 // Codegen consumes NeedsRuntimeOffset to decide whether a layer must
 // store offsetBase (R4) into its per-layer entry slot, and whether
 // downstream where / capture / option-walk loads must address through
@@ -170,7 +176,7 @@ func addChainRootWarning(p *ir.Program, f *ast.Filter) {
 // into the same slot — codegen's per-alt advance logic guarantees
 // whichever alt matched is the one whose R4 entry was just stored.
 func markRuntimeOffsetLayers(p *ir.Program) {
-	hetAltPos := -1
+	boundary := -1
 	for i, l := range p.Layers {
 		if l == nil {
 			continue
@@ -181,16 +187,20 @@ func markRuntimeOffsetLayers(p *ir.Program) {
 				alt.LayerPos = i
 			}
 		}
-		if hetAltPos == -1 && ir.IsHeterogeneousAlt(l) {
-			hetAltPos = i
+		// The earliest layer whose size is runtime-variable is the
+		// boundary: every later layer's start offset is then runtime,
+		// so downstream where/capture reads must address through the
+		// per-layer entry slot instead of a compile-time prefix.
+		if boundary == -1 && (ir.IsHeterogeneousAlt(l) || (l.Spec != nil && l.Spec.HasVariableLayout())) {
+			boundary = i
 		}
 	}
-	if hetAltPos == -1 {
+	if boundary == -1 {
 		return
 	}
 
 	mark := func(target *ir.LayerInstance) {
-		if target == nil || target.LayerPos <= hetAltPos {
+		if target == nil || target.LayerPos <= boundary {
 			return
 		}
 		target.NeedsRuntimeOffset = true
