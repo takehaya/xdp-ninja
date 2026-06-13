@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/takehaya/xdp-ninja/compare/v0.10.2...v0.11.0) (2026-06-13)
+
+
+### 🎉 Features
+
+* **vocab:** skip Geneve option section to resolve inner offset ([#36](https://github.com/takehaya/xdp-ninja/issues/36)) ([1db3507](https://github.com/takehaya/xdp-ninja/commit/1db3507a5e4cac3d4dda13cdc2622d6022a142c5))
+
+
+### 🐛 Bug Fixes
+
+* **resolve:** reject any/all over two distinct aux stacks ([#34](https://github.com/takehaya/xdp-ninja/issues/34)) ([47d01a0](https://github.com/takehaya/xdp-ninja/commit/47d01a0917f940affc044e4563fc8f1a3f2f37a3))
+
 ## [0.10.2](https://github.com/takehaya/xdp-ninja/compare/v0.10.1...v0.10.2) (2026-06-11)
 
 
