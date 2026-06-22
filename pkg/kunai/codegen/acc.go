@@ -89,14 +89,13 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 	}
 	// Cap the number of per-iteration field-read atoms. Each atom adds a
 	// bounded packet read plus kind/value compares to the bpf_loop
-	// callback; even though the loop carries a single accumulator slot,
-	// the per-iteration branch + pointer-state count still grows with the
-	// atom count and crosses the verifier's instruction-processing budget
-	// past this bound (measured on 6.15: 2 atoms load, 3+ blow the 1M
-	// limit). Above the cap, returning nil routes the program to the
-	// compile-time reject in emitStateBody — a clean diagnostic instead of
-	// bytecode the verifier refuses. Raising it needs the per-atom callback
-	// cost cut further (see the multi-option follow-up).
+	// callback. With the cursor-forget convergence trick (see
+	// emitMultiStateCallback), three atoms load across the whole 6.1--7.0
+	// matrix; four still exceeds the verifier's 1M instruction budget on
+	// 7.0 (its verifier explores more states even after the forget).
+	// Above the cap, returning nil routes the program to the compile-time
+	// reject in emitStateBody — a clean diagnostic instead of bytecode the
+	// verifier refuses.
 	if len(plan.atoms) > accMaxAtoms {
 		return nil
 	}
@@ -105,8 +104,9 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 
 // accMaxAtoms bounds how many option-field equality atoms the accumulator
 // lowering folds in one TLV walk — the largest count verified to load
-// across the kernel matrix (see buildAccPlan).
-const accMaxAtoms = 2
+// across the 6.1--7.0 kernel matrix (see buildAccPlan and the
+// cursor-forget in emitMultiStateCallback).
+const accMaxAtoms = 3
 
 // flattenPureAnd returns the flat leaf list of a where condition that is
 // a pure conjunction (a tree of ast.WAnd whose leaves are all

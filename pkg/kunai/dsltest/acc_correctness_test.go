@@ -51,3 +51,34 @@ func TestTCPMultiOptionAccumulator(t *testing.T) {
 	none := Defaults()
 	r.MustReject(t, Build(t, none), "neither option present")
 }
+
+// TestTCPThreeOptionAccumulator checks the cap-limit case (three option
+// equalities), which only loads thanks to the cursor-forget convergence
+// trick. Verifies the forget preserves runtime verdicts: accept iff all
+// three options are present and match.
+func TestTCPThreeOptionAccumulator(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where tcp.options.MSS.value == 1460 and tcp.options.WS.shift == 7 and tcp.options.SACK_PERM.kind == 4")
+
+	mss := layers.TCPOption{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}
+	ws := func(s byte) layers.TCPOption {
+		return layers.TCPOption{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{s}}
+	}
+	sackPerm := layers.TCPOption{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2}
+
+	all := Defaults()
+	all.TCPOptions = []layers.TCPOption{mss, ws(7), sackPerm}
+	r.MustMatch(t, Build(t, all), "MSS=1460 AND WS=7 AND SACK_PERM present")
+
+	// reordered, still all present
+	reordered := Defaults()
+	reordered.TCPOptions = []layers.TCPOption{sackPerm, ws(7), mss}
+	r.MustMatch(t, Build(t, reordered), "reordered, all match")
+
+	noSackPerm := Defaults()
+	noSackPerm.TCPOptions = []layers.TCPOption{mss, ws(7)}
+	r.MustReject(t, Build(t, noSackPerm), "SACK_PERM absent — bit 2 stays 0")
+
+	wsBad := Defaults()
+	wsBad.TCPOptions = []layers.TCPOption{mss, ws(9), sackPerm}
+	r.MustReject(t, Build(t, wsBad), "WS mismatch")
+}

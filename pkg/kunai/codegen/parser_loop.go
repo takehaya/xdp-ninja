@@ -371,6 +371,31 @@ func (c *pmCtx) emitMultiStateCallback(entry *vocab.ParseState, entryIdx int, cb
 		// which lets the subsequent `pkt + R3` adds verify.
 		asm.JGT.Imm(asm.R3, int32(ScratchBufSize)-1, breakLabel),
 	}
+	// Accumulator-walk convergence: the cursor is a data-dependent
+	// accumulator whose tracked range's smin creeps up each iteration, so
+	// bpf_loop's RANGE_WITHIN pruning never fires and the verifier
+	// re-explores the callback per distinct cursor state — fine for one or
+	// two recorded slots, but the accumulator's >=3 inline option reads
+	// then blow the 1M instruction budget. XOR the cursor twice with an
+	// unconstrained scratch byte (a runtime identity: x^s^s == x) to wipe
+	// the verifier's range history while preserving the value, so every
+	// iteration re-enters with the same [0,511] tnum and the loop prunes.
+	// The salt is read from scratch[0] (bounds-checked) and is never
+	// branched on. This rests on tnum xor semantics (the verifier does not
+	// cancel the double xor), confirmed to load 3-option accumulators
+	// across the 6.1--7.0 matrix. Scoped to the accumulator path so the
+	// single-option and counter-driven (Geneve) callbacks are unchanged.
+	if c.accPlan.atomsFor(c.layer) != nil {
+		insns = append(insns,
+			asm.Mov.Reg(asm.R0, asm.R4),
+			asm.Add.Imm(asm.R0, 1),
+			asm.JGT.Reg(asm.R0, asm.R5, breakLabel),
+			asm.LoadMem(asm.R0, asm.R4, 0, asm.Byte),
+			asm.Xor.Reg(asm.R3, asm.R0),
+			asm.Xor.Reg(asm.R3, asm.R0),
+			asm.JGT.Imm(asm.R3, int32(ScratchBufSize)-1, breakLabel),
+		)
+	}
 	// Per-case dispatch over the lookahead<bit<N>>() key. Use the
 	// existing emitSelectGeneric machinery with a callback-flavoured
 	// selectAddr that materialises the bytes at R4+R3.
