@@ -117,3 +117,33 @@ func TestTCPFourOptionAccumulator(t *testing.T) {
 	tsBad.TCPOptions = []layers.TCPOption{mss, ws(7), sackPerm, ts(2)}
 	r.MustReject(t, Build(t, tsBad), "TS tsval mismatch")
 }
+
+// TestTCPEightOptionAccumulator checks the N-walks path at the accMaxAtoms
+// ceiling: eight atoms (two fields on each of the four option types) lower
+// to eight single-option walks. Verifies verdicts stay correct as the walk
+// count and accumulator bit width grow.
+func TestTCPEightOptionAccumulator(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where "+
+		"tcp.options.MSS.value == 1460 and tcp.options.MSS.length == 4 "+
+		"and tcp.options.WS.shift == 7 and tcp.options.WS.length == 3 "+
+		"and tcp.options.SACK_PERM.kind == 4 and tcp.options.SACK_PERM.length == 2 "+
+		"and tcp.options.TS.tsval == 1 and tcp.options.TS.tsecr == 2")
+
+	mss := layers.TCPOption{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}
+	ws := layers.TCPOption{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{7}}
+	sackPerm := layers.TCPOption{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2}
+	ts := func(tsval, tsecr uint32) layers.TCPOption {
+		return layers.TCPOption{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: []byte{
+			byte(tsval >> 24), byte(tsval >> 16), byte(tsval >> 8), byte(tsval),
+			byte(tsecr >> 24), byte(tsecr >> 16), byte(tsecr >> 8), byte(tsecr),
+		}}
+	}
+
+	all := Defaults()
+	all.TCPOptions = []layers.TCPOption{mss, ws, sackPerm, ts(1, 2)}
+	r.MustMatch(t, Build(t, all), "all eight field equalities hold")
+
+	tsecrBad := Defaults()
+	tsecrBad.TCPOptions = []layers.TCPOption{mss, ws, sackPerm, ts(1, 9)}
+	r.MustReject(t, Build(t, tsecrBad), "TS tsecr mismatch — its bit stays 0")
+}

@@ -90,9 +90,12 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 	// Cap the total number of option-field equality atoms. Up to
 	// combinedAccMaxAtoms load as one combined bpf_loop callback; beyond
 	// that (and up to accMaxAtoms) the program lowers to one single-option
-	// walk per atom (N-walks). Above accMaxAtoms, returning nil routes the
-	// program to the compile-time reject in emitStateBody — a clean
-	// diagnostic instead of bytecode the verifier refuses.
+	// walk per atom (N-walks), whose cost is linear in the atom count (the
+	// cursor and accumulator forgets remove the per-iteration fan-out and
+	// the cross-walk 2^N branching respectively). Above accMaxAtoms,
+	// returning nil routes the program to the compile-time reject in
+	// emitStateBody — a clean diagnostic instead of bytecode the verifier
+	// refuses.
 	if len(plan.atoms) > accMaxAtoms {
 		return nil
 	}
@@ -102,9 +105,12 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 // accMaxAtoms bounds how many option-field equality atoms the accumulator
 // lowering folds across one TLV walk (combined callback) or one walk per
 // atom (N-walks) — the largest count verified to load across the 6.1--7.0
-// kernel matrix. See buildAccPlan, emitMultiStateNWalksAccumulator, and
-// the cursor-forget in emitMultiStateCallback.
-const accMaxAtoms = 4
+// kernel matrix. The N-walks cost is linear in the atom count, so this is
+// a policy ceiling (well above any realistic TCP query, which has four
+// distinct option types) rather than a hard verifier limit. See
+// buildAccPlan, emitMultiStateNWalksAccumulator, and the forgets in
+// emitMultiStateCallback / emitMultiStateNWalksAccumulator.
+const accMaxAtoms = 8
 
 // combinedAccMaxAtoms is the largest atom count the combined single-
 // callback accumulator carries in one bpf_loop matrix-wide. Past it, four

@@ -153,13 +153,33 @@ func TestTLVWalkCascadeMultiOptionAccumulator(t *testing.T) {
 			reject: false,
 		},
 		{
-			// accMaxAtoms (=4) is the overall ceiling; a fifth atom (here a
-			// second field on the TS option) rejects at compile time.
-			name: "pure_and_eq_5opt_over_cap",
+			// Eight atoms (two fields on each of the four option types) still
+			// lower via N-walks — the per-walk cost is linear in the atom
+			// count, so this is well within accMaxAtoms (=8).
+			name: "pure_and_eq_8opt_nwalks",
 			expr: "eth/ipv4/tcp where " +
 				"tcp.options.MSS.value == 1460 " +
+				"and tcp.options.MSS.length == 4 " +
 				"and tcp.options.WS.shift == 7 " +
+				"and tcp.options.WS.length == 3 " +
 				"and tcp.options.SACK_PERM.kind == 4 " +
+				"and tcp.options.SACK_PERM.length == 2 " +
+				"and tcp.options.TS.tsval == 1 " +
+				"and tcp.options.TS.tsecr == 2",
+			reject: false,
+		},
+		{
+			// accMaxAtoms (=8) is the overall ceiling; a ninth atom (a third
+			// field on the MSS option) rejects at compile time.
+			name: "pure_and_eq_9opt_over_cap",
+			expr: "eth/ipv4/tcp where " +
+				"tcp.options.MSS.value == 1460 " +
+				"and tcp.options.MSS.length == 4 " +
+				"and tcp.options.MSS.kind == 2 " +
+				"and tcp.options.WS.shift == 7 " +
+				"and tcp.options.WS.length == 3 " +
+				"and tcp.options.SACK_PERM.kind == 4 " +
+				"and tcp.options.SACK_PERM.length == 2 " +
 				"and tcp.options.TS.tsval == 1 " +
 				"and tcp.options.TS.tsecr == 2",
 			reject: true,
