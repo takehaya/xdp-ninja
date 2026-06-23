@@ -27,8 +27,9 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// envelopeExprs returns the structural-extreme expressions, labelled to
-// line up with the two axes of TestM2Envelope / fig_envelope.tex.
+// envelopeExprs returns the structural-extreme expressions, labelled by the
+// three lowering-path axes (A: chain quantifier, B: SRv6 aux-walk stack,
+// C: counter-driven Geneve option walk) exercised below.
 func envelopeExprs() []struct{ id, expr string } {
 	out := []struct{ id, expr string }{
 		// Axis A — chain quantifier past the static-unroll cap (4), in the
