@@ -122,6 +122,13 @@ codegen には別途、callback の分岐命令数を静的に数える tripwire
 - 起動条件: distinct な option が 2 種類以上で、`where` 全体が
   `<option>.<field> == <const>` の純粋な AND であること (`buildAccPlan`)。
   単一 option や、`!=`・非 option atom が混ざる形は別経路 (従来どおり)。
+  対象 layer は lookahead-only walk (TCP options) であること。counter-driven
+  walk (Geneve / IPv4 options) は native path のまま (`buildAccPlan` が gate)。
+- 既知の限界: alternation の中の TCP に対する多 option クエリ
+  (`eth/ipv4/(tcp|udp) where tcp.options.MSS.value == .. and ..`) は現状
+  reject される。plan の plumbing と acc slot の zero-init が alternation
+  member 向けに配線されていないため (単一 option の同形は通る)。alternation
+  前に acc slot を zero-init すれば対応可能 — follow-up。
 
 ## 7. 関連ファイル / テスト
 

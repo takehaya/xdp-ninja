@@ -115,12 +115,16 @@ func genAlternation(layer *ir.LayerInstance, index int, all []*ir.LayerInstance,
 		// pass too, so the duplicate is dead code at runtime. The
 		// alternative is threading a custom fail label through every
 		// layer emit which is a much larger refactor for marginal gain.
-		// nil accPlan: an accumulator plan targets a single concrete
-		// parser-machine layer the program queries, never an alternation
-		// member (alt members are distinct LayerInstances and the het-alt
-		// path the resolver flags is incompatible with the TCP-option
-		// shape buildAccPlan accepts). Passing nil keeps such a layer on
-		// the standard per-option path.
+		// nil accPlan: the accumulator's plan plumbing and its per-walk
+		// slot zero-init are wired for a top-level parser-machine layer,
+		// not an alternation member. So a multi-option query bound to an
+		// alt member (e.g. `eth/ipv4/(tcp|udp) where tcp.options.MSS.value
+		// == .. and tcp.options.WS.shift == ..`) is rejected at compile
+		// time instead of lowered here; single-option queries on an alt
+		// member are unaffected (they need no plan). Lifting this needs the
+		// acc slot zeroed before the alternation so a non-matching branch
+		// still leaves it defined for the post-layer mask check — a
+		// follow-up, not a fundamental incompatibility.
 		altBody, altCbs, err := genLayerInner(alt, index, all, qo, nil)
 		if err != nil {
 			return nil, nil, err
