@@ -252,3 +252,25 @@ func (p *accPlan) atomsFor(layer *ir.LayerInstance) []accAtom {
 	}
 	return p.atoms
 }
+
+// groupAtomsByLayout buckets atoms by their owning option (layout),
+// preserving first-appearance order. The N-walks lowering emits one walk
+// per group, so multiple queried fields of the same option share a single
+// walk (and a single re-scan of the TLV list) instead of one walk per
+// field — making the walk count scale with the distinct-option count, not
+// the atom count.
+func groupAtomsByLayout(atoms []accAtom) [][]accAtom {
+	var order []*vocab.AuxLayout
+	groups := map[*vocab.AuxLayout][]accAtom{}
+	for _, a := range atoms {
+		if _, ok := groups[a.layout]; !ok {
+			order = append(order, a.layout)
+		}
+		groups[a.layout] = append(groups[a.layout], a)
+	}
+	out := make([][]accAtom, 0, len(order))
+	for _, l := range order {
+		out = append(out, groups[l])
+	}
+	return out
+}

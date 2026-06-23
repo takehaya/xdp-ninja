@@ -46,8 +46,7 @@ func genParserMachine(layer *ir.LayerInstance, layerIdx int, all []*ir.LayerInst
 		r4IsRange:    precedingLayersLeaveR4Range(all, layerIdx),
 		queried:      qo,
 		queriedAuxes: buildQueriedAuxNames(qo, layer),
-		accPlan:        plan,
-		accWalkAtomIdx: -1,
+		accPlan: plan,
 	}
 	// Pre-scan for multi-state self-loops. Each loop entry's siblings
 	// inline into the entry's bpf_loop callback, so the per-state
@@ -121,13 +120,14 @@ type pmCtx struct {
 	// option into a single slot. nil for every program that is not the
 	// supported pure-AND-equality multi-option TCP shape (see acc.go).
 	accPlan *accPlan
-	// accWalkAtomIdx, when >= 0, restricts the accumulator prelude to a
-	// single atom (index into accPlan.atoms) for the N-walks lowering:
-	// each walk evaluates one option so its callback stays a cheap
-	// single-option walk that converges on every kernel, and N independent
-	// walks compose without the combined callback's per-iteration fan-out.
-	// -1 (default) emits all atoms in one combined callback.
-	accWalkAtomIdx int
+	// accWalkAtoms, when non-nil, restricts the accumulator prelude to a
+	// subset of accPlan.atoms for the N-walks lowering: one walk per
+	// distinct option, carrying that option's queried fields. Keeping each
+	// walk to a single option keeps its callback a cheap single-kind walk
+	// that converges on every kernel, and the walks compose without the
+	// combined callback's multi-kind per-iteration fan-out. nil (default)
+	// emits all atoms in one combined callback.
+	accWalkAtoms []accAtom
 }
 
 // precedingLayersLeaveR4Range scans the layers emitted before idx and

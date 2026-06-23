@@ -170,14 +170,17 @@ func (c *pmCtx) emitMultiStateSelfLoop(state *vocab.ParseState, stateIdx int) (a
 }
 
 // emitMultiStateNWalksAccumulator lowers an accumulator plan as one
-// bpf_loop per atom instead of a single combined callback. Each walk
-// evaluates exactly one option equality (accWalkAtomIdx) and ORs its bit
-// into the shared accumulator slot, so its callback is a cheap single-
-// option walk that converges (with the cursor forget) on every kernel —
-// where a combined callback with 4 inline field reads still blows the 1M
-// budget on 7.0. The cursor is reset to options-start before each walk;
-// the accumulator slot persists across walks (zeroed once at machine
-// entry). Cost is ~N x a single walk. Used for atom counts the combined
+// bpf_loop per DISTINCT option instead of a single combined callback. Each
+// walk dispatches on one option kind and ORs that option's queried fields'
+// match bits into the shared accumulator slot, so its callback is a cheap
+// single-kind walk that converges (with the cursor forget) on every kernel
+// — where a combined callback dispatching on several option kinds per
+// iteration blows the 1M budget on 7.0 past three options. Atoms are
+// grouped by option so multiple fields of the same option share one walk
+// (one re-scan), not one walk each. The cursor is reset to options-start
+// before each walk; the accumulator slot persists across walks (zeroed
+// once at machine entry) and is canonicalized between them. Cost is linear
+// in the distinct-option count. Used for option counts the combined
 // callback cannot carry matrix-wide.
 func (c *pmCtx) emitMultiStateNWalksAccumulator(state *vocab.ParseState, stateIdx int) (asm.Instructions, asm.Instructions, error) {
 	maxIter := c.spec.MaxDepth
@@ -191,13 +194,14 @@ func (c *pmCtx) emitMultiStateNWalksAccumulator(state *vocab.ParseState, stateId
 		return nil, nil, fmt.Errorf("%w: N-walks accumulator needs a static options-start offset on %q", ErrNotImplemented, state.Name)
 	}
 	atoms := c.accPlan.atomsFor(c.layer)
+	groups := groupAtomsByLayout(atoms)
 	accSlotOff, err := c.accPlan.accSlot(c.queried)
 	if err != nil {
 		return nil, nil, err
 	}
 	var insns asm.Instructions
 	var callbacks asm.Instructions
-	for i := range atoms {
+	for i, group := range groups {
 		if i > 0 {
 			// Reset the cursor (offsetBase) to options-start for the next
 			// walk: layer entry (read-only during a TCP walk) + the entry's
@@ -207,11 +211,11 @@ func (c *pmCtx) emitMultiStateNWalksAccumulator(state *vocab.ParseState, stateId
 				asm.Add.Imm(offsetBase, int32(state.OffsetAtEntry)),
 			)
 		}
-		c.accWalkAtomIdx = i
+		c.accWalkAtoms = group
 		cbSym := fmt.Sprintf("%s_w%d", c.selfLoopCbSym(stateIdx), i)
 		callback, err := c.emitMultiStateCallback(state, stateIdx, cbSym)
 		if err != nil {
-			c.accWalkAtomIdx = -1
+			c.accWalkAtoms = nil
 			return nil, nil, err
 		}
 		insns = append(insns,
@@ -252,7 +256,7 @@ func (c *pmCtx) emitMultiStateNWalksAccumulator(state *vocab.ParseState, stateId
 		)
 		callbacks = append(callbacks, callback...)
 	}
-	c.accWalkAtomIdx = -1
+	c.accWalkAtoms = nil
 	insns = append(insns, asm.Ja.Label(c.doneLabel))
 	return insns, callbacks, nil
 }
@@ -405,9 +409,9 @@ func (c *pmCtx) emitDynamicAuxSlotPrelude(sel *vocab.SelectOp, breakLabel string
 	// option positions into N slots (the shape the verifier rejects for
 	// >=2 options). See acc.go and emitAccPrelude.
 	if atoms := c.accPlan.atomsFor(c.layer); atoms != nil {
-		// N-walks lowering: each walk evaluates a single atom.
-		if c.accWalkAtomIdx >= 0 && c.accWalkAtomIdx < len(atoms) {
-			atoms = atoms[c.accWalkAtomIdx : c.accWalkAtomIdx+1]
+		// N-walks lowering: each walk evaluates one distinct option's atoms.
+		if c.accWalkAtoms != nil {
+			atoms = c.accWalkAtoms
 		}
 		return c.emitAccPrelude(sel, atoms, breakLabel)
 	}
