@@ -169,6 +169,87 @@ func (c *pmCtx) emitMultiStateSelfLoop(state *vocab.ParseState, stateIdx int) (a
 	return insns, callback, nil
 }
 
+// emitMultiStateNWalksAccumulator lowers an accumulator plan as one
+// bpf_loop per atom instead of a single combined callback. Each walk
+// evaluates exactly one option equality (accWalkAtomIdx) and ORs its bit
+// into the shared accumulator slot, so its callback is a cheap single-
+// option walk that converges (with the cursor forget) on every kernel —
+// where a combined callback with 4 inline field reads still blows the 1M
+// budget on 7.0. The cursor is reset to options-start before each walk;
+// the accumulator slot persists across walks (zeroed once at machine
+// entry). Cost is ~N x a single walk. Used for atom counts the combined
+// callback cannot carry matrix-wide.
+func (c *pmCtx) emitMultiStateNWalksAccumulator(state *vocab.ParseState, stateIdx int) (asm.Instructions, asm.Instructions, error) {
+	maxIter := c.spec.MaxDepth
+	if maxIter == 0 {
+		maxIter = defaultChainDepth
+	}
+	if maxIter > bpfLoopChainCap {
+		return nil, nil, fmt.Errorf("%w: parser machine %s N-walks depth %d exceeds cap %d", ErrNotImplemented, c.spec.Name, maxIter, bpfLoopChainCap)
+	}
+	if state.OffsetAtEntry < 0 {
+		return nil, nil, fmt.Errorf("%w: N-walks accumulator needs a static options-start offset on %q", ErrNotImplemented, state.Name)
+	}
+	atoms := c.accPlan.atomsFor(c.layer)
+	accSlotOff, err := c.accPlan.accSlot(c.queried)
+	if err != nil {
+		return nil, nil, err
+	}
+	var insns asm.Instructions
+	var callbacks asm.Instructions
+	for i := range atoms {
+		if i > 0 {
+			// Reset the cursor (offsetBase) to options-start for the next
+			// walk: layer entry (read-only during a TCP walk) + the entry's
+			// static header offset. R0/R1 survive the prior walk's reload.
+			insns = append(insns,
+				asm.LoadMem(offsetBase, asm.R10, bpfLoopCtxLayerEntrySlot, asm.DWord),
+				asm.Add.Imm(offsetBase, int32(state.OffsetAtEntry)),
+			)
+		}
+		c.accWalkAtomIdx = i
+		cbSym := fmt.Sprintf("%s_w%d", c.selfLoopCbSym(stateIdx), i)
+		callback, err := c.emitMultiStateCallback(state, stateIdx, cbSym)
+		if err != nil {
+			c.accWalkAtomIdx = -1
+			return nil, nil, err
+		}
+		insns = append(insns,
+			asm.StoreMem(asm.R10, bpfLoopCtxOffsetSlot, offsetBase, asm.DWord),
+			asm.StoreMem(asm.R10, bpfLoopCtxScratchStartSlot, asm.R0, asm.DWord),
+			asm.StoreMem(asm.R10, bpfLoopCtxScratchEndSlot, asm.R1, asm.DWord),
+			asm.Mov.Imm(asm.R1, int32(maxIter)),
+			loadFunctionRef(asm.R2, cbSym),
+			asm.Mov.Reg(asm.R3, asm.R10),
+			asm.Add.Imm(asm.R3, bpfLoopCtxBaseOffset),
+			asm.Mov.Imm(asm.R4, 0),
+			asm.FnLoop.Call(),
+			asm.LoadMem(offsetBase, asm.R10, bpfLoopCtxOffsetSlot, asm.DWord),
+			asm.LoadMem(asm.R0, asm.R10, bpfLoopCtxScratchStartSlot, asm.DWord),
+			asm.LoadMem(asm.R1, asm.R10, bpfLoopCtxScratchEndSlot, asm.DWord),
+		)
+		// Canonicalize the accumulator between walks: XOR it twice with a
+		// scratch byte (a runtime identity) so its precise 2^N cross-walk
+		// history collapses to a conservative envelope and the sequential
+		// walks do not multiply verifier states (Codex's "canonicalize hits
+		// too"). The runtime bits are preserved for the final mask check.
+		insns = append(insns,
+			asm.Mov.Reg(asm.R5, asm.R0),
+			asm.Add.Imm(asm.R5, 1),
+			asm.JGT.Reg(asm.R5, asm.R1, c.doneLabel),
+			asm.LoadMem(asm.R3, asm.R0, 0, asm.Byte),
+			asm.LoadMem(asm.R5, asm.R10, accSlotOff, asm.DWord),
+			asm.Xor.Reg(asm.R5, asm.R3),
+			asm.Xor.Reg(asm.R5, asm.R3),
+			asm.StoreMem(asm.R10, accSlotOff, asm.R5, asm.DWord),
+		)
+		callbacks = append(callbacks, callback...)
+	}
+	c.accWalkAtomIdx = -1
+	insns = append(insns, asm.Ja.Label(c.doneLabel))
+	return insns, callbacks, nil
+}
+
 // isLookaheadOnlyLoop reports whether the multi-state loop entry at
 // stateIdx dispatches on a single lookahead key (the TCP-options shape),
 // not a counter or counter+lookahead tuple (IPv4 / Geneve). Only the
@@ -317,6 +398,10 @@ func (c *pmCtx) emitDynamicAuxSlotPrelude(sel *vocab.SelectOp, breakLabel string
 	// option positions into N slots (the shape the verifier rejects for
 	// >=2 options). See acc.go and emitAccPrelude.
 	if atoms := c.accPlan.atomsFor(c.layer); atoms != nil {
+		// N-walks lowering: each walk evaluates a single atom.
+		if c.accWalkAtomIdx >= 0 && c.accWalkAtomIdx < len(atoms) {
+			atoms = atoms[c.accWalkAtomIdx : c.accWalkAtomIdx+1]
+		}
 		return c.emitAccPrelude(sel, atoms, breakLabel)
 	}
 	demand := c.queried[c.layer]
@@ -354,7 +439,11 @@ func (c *pmCtx) emitDynamicAuxSlotPrelude(sel *vocab.SelectOp, breakLabel string
 // either an inlined sibling body (extract or advance + return 0) or
 // breaks (accept / reject / EOL → return 1).
 func (c *pmCtx) emitMultiStateCallback(entry *vocab.ParseState, entryIdx int, cbSym string) (asm.Instructions, error) {
-	breakLabel := c.selfLoopBreak(entryIdx)
+	// Derive labels from cbSym (not entryIdx) so the N-walks accumulator,
+	// which emits one callback per option with distinct cbSyms, gets
+	// distinct break labels. For the single-callback path cbSym ==
+	// selfLoopCbSym(entryIdx), so this equals selfLoopBreak.
+	breakLabel := cbSym + "_break"
 	continueLabel := cbSym + "_continue"
 
 	first := asm.LoadMem(asm.R3, asm.R2, bpfLoopCbCtxOffsetField, asm.DWord).WithSymbol(cbSym)

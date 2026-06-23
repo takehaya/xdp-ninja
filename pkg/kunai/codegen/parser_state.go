@@ -46,7 +46,8 @@ func genParserMachine(layer *ir.LayerInstance, layerIdx int, all []*ir.LayerInst
 		r4IsRange:    precedingLayersLeaveR4Range(all, layerIdx),
 		queried:      qo,
 		queriedAuxes: buildQueriedAuxNames(qo, layer),
-		accPlan:      plan,
+		accPlan:        plan,
+		accWalkAtomIdx: -1,
 	}
 	// Pre-scan for multi-state self-loops. Each loop entry's siblings
 	// inline into the entry's bpf_loop callback, so the per-state
@@ -120,6 +121,13 @@ type pmCtx struct {
 	// option into a single slot. nil for every program that is not the
 	// supported pure-AND-equality multi-option TCP shape (see acc.go).
 	accPlan *accPlan
+	// accWalkAtomIdx, when >= 0, restricts the accumulator prelude to a
+	// single atom (index into accPlan.atoms) for the N-walks lowering:
+	// each walk evaluates one option so its callback stays a cheap
+	// single-option walk that converges on every kernel, and N independent
+	// walks compose without the combined callback's per-iteration fan-out.
+	// -1 (default) emits all atoms in one combined callback.
+	accWalkAtomIdx int
 }
 
 // precedingLayersLeaveR4Range scans the layers emitted before idx and
@@ -288,6 +296,15 @@ func (c *pmCtx) emitStateBody(state *vocab.ParseState, stateIdx int, isEntry boo
 		// normal path.
 		if c.isLookaheadOnlyLoop(stateIdx) && len(c.queried[c.layer]) >= 2 && c.accPlan.atomsFor(c.layer) == nil {
 			return nil, nil, fmt.Errorf("%w: querying %d options of %q in one filter exceeds the verifier's state budget; the accumulator lowering handles up to %d option equalities (a pure AND of `<option>.<field> == <const>`) per filter, so query at most %d options", ErrNotImplemented, len(c.queried[c.layer]), c.spec.Name, accMaxAtoms, accMaxAtoms)
+		}
+		// Accumulator routing: the combined single-callback path carries up
+		// to combinedAccMaxAtoms (=3) option equalities in one bpf_loop —
+		// the matrix-wide ceiling for one callback (4 inline reads exceed
+		// 7.0's budget). Past it, split into one single-option walk per atom
+		// (N-walks), each a cheap converging loop, with the accumulator
+		// canonicalized between walks.
+		if atoms := c.accPlan.atomsFor(c.layer); len(atoms) > combinedAccMaxAtoms {
+			return c.emitMultiStateNWalksAccumulator(state, stateIdx)
 		}
 		return c.emitMultiStateSelfLoop(state, stateIdx)
 	}

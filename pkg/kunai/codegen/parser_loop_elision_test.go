@@ -140,16 +140,28 @@ func TestTLVWalkCascadeMultiOptionAccumulator(t *testing.T) {
 			reject: false,
 		},
 		{
-			// The accumulator caps at accMaxAtoms (=3) option equalities —
-			// the matrix-wide ceiling (the cursor-forget converges 3 atoms
-			// on 6.1--7.0, but 4 still exceeds the verifier budget on 7.0),
-			// so >3 rejects even in pure-AND-equality shape.
-			name: "pure_and_eq_4opt_over_cap",
+			// Four atoms lower via the N-walks path (one single-option walk
+			// per atom): the combined callback caps at combinedAccMaxAtoms
+			// (=3) matrix-wide, so the fourth splits the plan into separate
+			// walks with the accumulator canonicalized between them.
+			name: "pure_and_eq_4opt_nwalks",
 			expr: "eth/ipv4/tcp where " +
 				"tcp.options.MSS.value == 1460 " +
 				"and tcp.options.WS.shift == 7 " +
 				"and tcp.options.SACK_PERM.kind == 4 " +
 				"and tcp.options.TS.tsval == 1",
+			reject: false,
+		},
+		{
+			// accMaxAtoms (=4) is the overall ceiling; a fifth atom (here a
+			// second field on the TS option) rejects at compile time.
+			name: "pure_and_eq_5opt_over_cap",
+			expr: "eth/ipv4/tcp where " +
+				"tcp.options.MSS.value == 1460 " +
+				"and tcp.options.WS.shift == 7 " +
+				"and tcp.options.SACK_PERM.kind == 4 " +
+				"and tcp.options.TS.tsval == 1 " +
+				"and tcp.options.TS.tsecr == 2",
 			reject: true,
 		},
 		{

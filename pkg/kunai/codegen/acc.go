@@ -87,15 +87,12 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 			return nil
 		}
 	}
-	// Cap the number of per-iteration field-read atoms. Each atom adds a
-	// bounded packet read plus kind/value compares to the bpf_loop
-	// callback. With the cursor-forget convergence trick (see
-	// emitMultiStateCallback), three atoms load across the whole 6.1--7.0
-	// matrix; four still exceeds the verifier's 1M instruction budget on
-	// 7.0 (its verifier explores more states even after the forget).
-	// Above the cap, returning nil routes the program to the compile-time
-	// reject in emitStateBody — a clean diagnostic instead of bytecode the
-	// verifier refuses.
+	// Cap the total number of option-field equality atoms. Up to
+	// combinedAccMaxAtoms load as one combined bpf_loop callback; beyond
+	// that (and up to accMaxAtoms) the program lowers to one single-option
+	// walk per atom (N-walks). Above accMaxAtoms, returning nil routes the
+	// program to the compile-time reject in emitStateBody — a clean
+	// diagnostic instead of bytecode the verifier refuses.
 	if len(plan.atoms) > accMaxAtoms {
 		return nil
 	}
@@ -103,10 +100,18 @@ func buildAccPlan(where *ir.Condition, qo queriedOptions) *accPlan {
 }
 
 // accMaxAtoms bounds how many option-field equality atoms the accumulator
-// lowering folds in one TLV walk — the largest count verified to load
-// across the 6.1--7.0 kernel matrix (see buildAccPlan and the
-// cursor-forget in emitMultiStateCallback).
-const accMaxAtoms = 3
+// lowering folds across one TLV walk (combined callback) or one walk per
+// atom (N-walks) — the largest count verified to load across the 6.1--7.0
+// kernel matrix. See buildAccPlan, emitMultiStateNWalksAccumulator, and
+// the cursor-forget in emitMultiStateCallback.
+const accMaxAtoms = 4
+
+// combinedAccMaxAtoms is the largest atom count the combined single-
+// callback accumulator carries in one bpf_loop matrix-wide. Past it, four
+// inline option reads per iteration exceed 7.0's verifier budget even with
+// the cursor forget, so emitStateBody splits the plan into N single-option
+// walks instead.
+const combinedAccMaxAtoms = 3
 
 // flattenPureAnd returns the flat leaf list of a where condition that is
 // a pure conjunction (a tree of ast.WAnd whose leaves are all

@@ -82,3 +82,38 @@ func TestTCPThreeOptionAccumulator(t *testing.T) {
 	wsBad.TCPOptions = []layers.TCPOption{mss, ws(9), sackPerm}
 	r.MustReject(t, Build(t, wsBad), "WS mismatch")
 }
+
+// TestTCPFourOptionAccumulator checks the N-walks path (four option
+// equalities lowered as one single-option walk per atom, accumulator
+// canonicalized between walks). Verifies the canonicalization preserves
+// runtime verdicts: accept iff all four options are present and match.
+func TestTCPFourOptionAccumulator(t *testing.T) {
+	r := New(t, "eth/ipv4/tcp where tcp.options.MSS.value == 1460 and tcp.options.WS.shift == 7 and tcp.options.SACK_PERM.kind == 4 and tcp.options.TS.tsval == 1")
+
+	mss := layers.TCPOption{OptionType: layers.TCPOptionKindMSS, OptionLength: 4, OptionData: []byte{0x05, 0xb4}}
+	ws := func(s byte) layers.TCPOption {
+		return layers.TCPOption{OptionType: layers.TCPOptionKindWindowScale, OptionLength: 3, OptionData: []byte{s}}
+	}
+	sackPerm := layers.TCPOption{OptionType: layers.TCPOptionKindSACKPermitted, OptionLength: 2}
+	ts := func(tsval uint32) layers.TCPOption {
+		return layers.TCPOption{OptionType: layers.TCPOptionKindTimestamps, OptionLength: 10, OptionData: []byte{
+			byte(tsval >> 24), byte(tsval >> 16), byte(tsval >> 8), byte(tsval), 0, 0, 0, 0,
+		}}
+	}
+
+	all := Defaults()
+	all.TCPOptions = []layers.TCPOption{mss, ws(7), sackPerm, ts(1)}
+	r.MustMatch(t, Build(t, all), "all four present and match")
+
+	reordered := Defaults()
+	reordered.TCPOptions = []layers.TCPOption{ts(1), sackPerm, ws(7), mss}
+	r.MustMatch(t, Build(t, reordered), "reordered, all match")
+
+	noTS := Defaults()
+	noTS.TCPOptions = []layers.TCPOption{mss, ws(7), sackPerm}
+	r.MustReject(t, Build(t, noTS), "TS absent — bit 3 stays 0")
+
+	tsBad := Defaults()
+	tsBad.TCPOptions = []layers.TCPOption{mss, ws(7), sackPerm, ts(2)}
+	r.MustReject(t, Build(t, tsBad), "TS tsval mismatch")
+}
