@@ -131,7 +131,7 @@ func TestBpfFilterSetDifferential(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s pkt#%d: libpcap vm.Run: %v", fs.ID, i, err)
 				}
-				pcapV := n > 0
+				pcapV := n != 0 // cBPF: 0 = reject, any non-zero = accept
 				if kunaiV != pcapV {
 					t.Errorf("%s pkt#%d verdict mismatch: kunai=%v libpcap=%v\n  kunai: %s\n  pcap : %s",
 						fs.ID, i, kunaiV, pcapV, fs.Expr, fs.CBPFCExpr)
