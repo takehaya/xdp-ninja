@@ -322,7 +322,7 @@ type CounterCallStmt struct {
 	Target    string // the `hdr` in `hdr.<F>` (parser's `out` parameter)
 	FieldName string // the `<F>` in `hdr.<F>`
 	BaseWords int    // the K subtracted from the field value (subtract form)
-	Mask      int    // the MASK bitwise-AND'd with the field value (mask form). Zero = subtract form active.
+	Mask      int    // the MASK bitwise-AND'd with the field value (mask form). Zero means no mask — the subtract form (BaseWords) or the bare-cast add form (Addend) is in use instead; it does not by itself select the subtract form.
 	ScaleLog2 int    // the S in `<< S` (unit: bits, like AdvanceField)
 	// Addend is the K added to the field value in the bare-cast add form
 	// `(bit<N>)(hdr.<F> + K)` — a scale=1, shift-free counter seed used

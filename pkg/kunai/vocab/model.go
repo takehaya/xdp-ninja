@@ -320,20 +320,19 @@ func (p *ProtocolSpec) AuxWalkSegmentTail() (*VariableTailSpec, int, bool) {
 	if bits%8 != 0 {
 		return nil, 0, false
 	}
-	// Bound the count byte to [0, 2^k-1] where 2^k >= Capacity, so the
-	// region (count*ElemSize) has a static upper bound (~Capacity*ElemSize)
-	// the verifier can prove. A valid SRH carries last_entry < Capacity, so
-	// the mask is identity for it; a malformed over-cap frame is clamped by
-	// the re-anchor's bounds check. Without this cap last_entry spans the
-	// full byte and the verifier rejects the unbounded R4 range.
-	mask := 1
-	for mask < st.Capacity {
-		mask <<= 1
-	}
-	mask--
+	// Bound the count byte to the exact maximum valid index Capacity-1.
+	// emitAuxWalkTailReanchor turns LenMask into a JGT-reject (not a
+	// bitwise AND), so an over-cap count is rejected outright rather than
+	// wrapped, and the region (count*ElemSize) keeps a static upper bound
+	// (Capacity*ElemSize) the verifier can prove. Using Capacity-1 directly,
+	// rather than rounding up to the next power-of-two mask, enforces the
+	// declared capacity precisely even when Capacity is not a power of two
+	// (a power-of-two mask would let counts in [Capacity, 2^k-1] slip past
+	// the bound check). A valid SRH carries last_entry < Capacity, so it
+	// passes; a malformed over-cap frame is rejected at the re-anchor.
 	return &VariableTailSpec{
 		LenFieldByteOff: cnt.ByteOff,
-		LenMask:         mask,
+		LenMask:         st.Capacity - 1,
 		LenShift:        0,
 		Scale:           st.ElemSize,
 		Base:            cnt.Addend * st.ElemSize,

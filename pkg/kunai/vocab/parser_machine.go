@@ -944,11 +944,14 @@ func lowerCastShiftSkip(target, fieldName string, baseWords, userMask, scaleLog2
 	// lowering there (require S ≥ 3 = scale ≥ 8). counter.set stores a
 	// scalar count rather than advancing R4, so it permits scale=1, but
 	// only via the shift-free bare-cast element-count form
-	// `(bit<N>)(hdr.<F> + K)` (ScaleLog2 == 0). A shifted form with S=1
-	// or S=2 has no whole-byte scale (1<<(S-3) would be a negative shift)
-	// and would silently collapse to scale=1, so it stays a loud reject
-	// even when allowSubByteScale is set.
-	if scaleLog2 < 3 && (!allowSubByteScale || scaleLog2 != 0) {
+	// `(bit<N>)(hdr.<F> + K)` — that form alone carries no mask and no
+	// subtract (ScaleLog2 == 0 with userMask == 0 and baseWords == 0). A
+	// shifted `((bit<N>)(hdr.<F> & MASK)) << S` / `(... - K) << S` form
+	// must keep a whole-byte scale: S=1 or S=2 has none (1<<(S-3) is a
+	// negative shift) and S=0 would silently collapse the byte-length seed
+	// to scale=1, so any masked/subtracting shifted form below S=3 stays a
+	// loud reject even when allowSubByteScale is set.
+	if scaleLog2 < 3 && (!allowSubByteScale || scaleLog2 != 0 || userMask != 0 || baseWords != 0) {
 		return nil, nil, fmt.Errorf("%s:%s: %s shift S=%d is sub-byte (scale must be a whole byte: use S ≥ 3, or the shift-free bare-cast `(bit<N>)(hdr.<F> + K)` element-count form)", ctx.source, pos, opName, scaleLog2)
 	}
 	if baseWords != 0 && userMask != 0 {

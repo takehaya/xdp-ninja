@@ -2286,6 +2286,57 @@ parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition 
 	}
 }
 
+// TestLoadParserCounterRejectsShiftedScaleOneSeed pins that a shifted
+// counter.set carrying a mask or subtract collapses to a loud reject at
+// S=0 too, not just S=1/S=2. `<< 0` is arithmetically scale=1, but the
+// scale=1 element-count seed must come only from the shift-free bare-cast
+// form `(bit<N>)(hdr.<F> + K)`; a shifted byte-length form must not be
+// able to express it. Regression guard for the userMask/baseWords arm of
+// the allowSubByteScale gate in lowerCastShiftSkip.
+func TestLoadParserCounterRejectsShiftedScaleOneSeed(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h { bit<8> ihl; }
+const bit<16> KUNAI_FOO_BAR_ETHERTYPE = 0x0800;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h h) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(h);
+        pc.set(((bit<8>)(h.ihl - 5)) << 0);
+        transition wait;
+    }
+    state wait {
+        transition select(pc.is_zero()) {
+            true:  accept;
+            false: consume;
+        }
+    }
+    state consume {
+        pkt.advance(8);
+        pc.decrement(1);
+        transition wait;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> dst; bit<48> src; bit<16> et; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	_, err := Load(fsys, "vocab")
+	if err == nil || !strings.Contains(err.Error(), "sub-byte") {
+		t.Fatalf("err = %v; want a sub-byte rejection for the `<< 0` subtracting counter.set shift", err)
+	}
+}
+
 func TestLoadParserCounterRejectsUndeclaredName(t *testing.T) {
 	fsys := fstest.MapFS{
 		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
