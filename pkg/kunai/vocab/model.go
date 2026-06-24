@@ -297,8 +297,11 @@ func (p *ProtocolSpec) pushedAuxStackName() (string, bool) {
 // segment-list end, short of any trailing TLVs.
 //
 // The region reuses the five-tuple emitAuxWalkTailReanchor consumes:
-// region = ((count_byte & 0) >> 0)*ElemSize + Addend*ElemSize — the count
-// byte read whole and scaled by the element width, with no mask or shift.
+// region = count*ElemSize + Addend*ElemSize. The count byte is read whole
+// (LenShift 0, no shift); LenMask carries the maximum valid index
+// Capacity-1, which emitAuxWalkTailReanchor enforces as a JGT-reject (an
+// over-cap count is rejected, not wrapped) so the scaled offset stays
+// within a static bound.
 //
 // Returns (nil, 0, false) for any protocol without a pushed aux stack or
 // without a derived stack count: ipv6 / gtp ext stacks self-terminate on

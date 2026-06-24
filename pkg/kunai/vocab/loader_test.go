@@ -903,8 +903,9 @@ func TestParseStateMachineSrv6(t *testing.T) {
 	// bare-cast add form `pc.set((bit<8>)(hdr.last_entry + 1))`: load
 	// last_entry (byte 4), scale=1 (no shift, element granularity), and
 	// add 1 (Addend). This element-driven seed is what the loader reads
-	// to derive the any()/all() count; the region BYTE length lives on
-	// the @kunai_variable_tail (hdr_ext_len * 8) instead.
+	// to derive the any()/all() count; the region BYTE length is then
+	// synthesised from that count by AuxWalkSegmentTail ((last_entry+1)*16),
+	// not carried on a @kunai_variable_tail annotation.
 	if len(start.Counters) != 1 {
 		t.Fatalf("start counter op count = %d, want 1 (pc.set)", len(start.Counters))
 	}
@@ -1407,10 +1408,11 @@ func specNames(s map[string]*ProtocolSpec) []string {
 // Mechanism 8 (ParserCounter byte-bounded walk) when option-aware
 // extraction landed. TCP is the lone remaining Mechanism-1 user
 // for its data_offset-driven trailer skip. SRv6 declares its
-// variable trail through pkt.advance in srv6.p4's skip_segments
-// state, and Geneve likewise skips its opt_len*4 options section via
-// pkt.advance in geneve.p4's skip_options state, so both are omitted
-// here too.
+// variable trail through a ParserCounter element walk (Mechanism 8,
+// the counter-driven segment extraction that replaced the old
+// skip_segments state), and Geneve skips its opt_len*4 options section
+// via pkt.advance in geneve.p4's skip_options state, so both are
+// omitted here too.
 func TestVariableTrailAbsentForFixedProtocols(t *testing.T) {
 	specs := loadBundled(t)
 	for _, name := range []string{"eth", "ipv4", "ipv6", "udp", "gtp", "vlan", "qinq", "mpls", "gre", "vxlan", "icmp", "icmp6", "cw"} {
