@@ -2339,6 +2339,60 @@ parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition 
 	}
 }
 
+// TestLoadParserCounterRejectsSubByteCountSeed pins that an element-driven
+// stack walk (push + decrement(1)) whose counter is seeded from a SUB-BYTE
+// field is a loud load-time reject. deriveStackCountsFromCounters reads the
+// seed byte whole (keeps only ByteOff+Addend), so a nibble-wide count would
+// be silently mis-derived (the whole byte read instead of the nibble) and
+// produce a wrong element count + next-header re-anchor. The bare-cast seed
+// is otherwise valid (scale=1), so the guard lives in the count derivation,
+// not in lowerCastShiftSkip. SRv6's last_entry is a whole byte and stays
+// accepted (covered by the bundled-load tests).
+func TestLoadParserCounterRejectsSubByteCountSeed(t *testing.T) {
+	fsys := fstest.MapFS{
+		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`
+header foo_h { bit<4> count_nib; bit<4> reserved; }
+header foo_seg_h { bit<32> val; }
+const bit<16> KUNAI_FOO_BAR_ETHERTYPE = 0x0800;
+
+extern ParserCounter {
+    ParserCounter();
+    void set(in bit<8> value);
+    void decrement(in bit<8> value);
+    bool is_zero();
+}
+
+parser F(packet_in pkt, out foo_h hdr, out foo_seg_h[8] segs) {
+    ParserCounter() pc;
+    state start {
+        pkt.extract(hdr);
+        pc.set((bit<8>)(hdr.count_nib + 1));
+        transition walk;
+    }
+    state walk {
+        transition select(pc.is_zero()) {
+            true:  accept;
+            false: consume;
+        }
+    }
+    state consume {
+        pkt.extract(segs.next);
+        pc.decrement(1);
+        transition walk;
+    }
+}
+`)},
+		"vocab/bar.p4": &fstest.MapFile{Data: []byte(`
+header bar_h { bit<48> dst; bit<48> src; bit<16> et; }
+parser B(packet_in pkt, out bar_h h) { state start { pkt.extract(h); transition accept; } }
+`)},
+	}
+	_, err := Load(fsys, "vocab")
+	if err == nil || !strings.Contains(err.Error(), "whole-byte") {
+		t.Fatalf("err = %v; want a whole-byte rejection for the sub-byte counter seed", err)
+	}
+}
+
 func TestLoadParserCounterRejectsUndeclaredName(t *testing.T) {
 	fsys := fstest.MapFS{
 		"vocab/foo.p4": &fstest.MapFile{Data: []byte(`

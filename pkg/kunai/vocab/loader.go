@@ -140,7 +140,11 @@ func loadFile(fsys fs.FS, p string, knownProtos map[string]bool) (*ProtocolSpec,
 	// Derive element counts for aux stacks driven by an element-granular
 	// ParserCounter walk (the annotation-free SRv6 segment path). The
 	// explicit @kunai_stack_count annotation, when present, wins.
-	for stack, spec := range deriveStackCountsFromCounters(machine) {
+	derivedCounts, err := deriveStackCountsFromCounters(machine, p)
+	if err != nil {
+		return nil, err
+	}
+	for stack, spec := range derivedCounts {
 		if _, annotated := stackCounts[stack]; annotated {
 			continue
 		}

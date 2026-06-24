@@ -337,9 +337,18 @@ func readParserParamCounts(file *p4lite.File, primaryFields []Field, source stri
 // carry no per-stack element semantics. Returns nil when no stack
 // qualifies. Entries here are merged under annotation priority by the
 // caller, so an explicit @kunai_stack_count always wins.
-func deriveStackCountsFromCounters(machine *ParseStateMachine) map[string]*StackCountSpec {
+//
+// The derived count reads the seed byte WHOLE — downstream
+// AuxWalkSegmentTail and the bpf_loop count guard scale a full-byte
+// value, keeping only ByteOff and Addend. A sub-byte or masked seed field
+// (LenShift != 0 || LenMask != 0xFF) would be silently mis-counted (the
+// whole byte read instead of the intended bit slice), yielding a wrong
+// element count and a wrong next-header re-anchor, so it is a loud
+// load-time reject rather than a silent miscompile — consistent with the
+// sub-byte counter.set shift reject in lowerCastShiftSkip.
+func deriveStackCountsFromCounters(machine *ParseStateMachine, source string) (map[string]*StackCountSpec, error) {
 	if machine == nil {
-		return nil
+		return nil, nil
 	}
 	var out map[string]*StackCountSpec
 	for _, st := range machine.States {
@@ -374,6 +383,11 @@ func deriveStackCountsFromCounters(machine *ParseStateMachine) map[string]*Stack
 		if set == nil || set.Skip == nil || set.Skip.Scale != 1 || set.Skip.Base != 0 {
 			continue
 		}
+		// The count is read from the seed byte whole; a sub-byte/masked
+		// seed field would be silently mis-counted. Reject it loudly.
+		if set.Skip.LenShift != 0 || set.Skip.LenMask != 0xFF {
+			return nil, fmt.Errorf("%s: counter %q seeding aux stack %q must read a whole-byte element count, but its seed field is sub-byte (byte %d, mask 0x%x, shift %d); use a byte-aligned bit<8> count field", source, counterName, stackName, set.Skip.LenByteOff, set.Skip.LenMask, set.Skip.LenShift)
+		}
 		if out == nil {
 			out = make(map[string]*StackCountSpec)
 		}
@@ -382,7 +396,7 @@ func deriveStackCountsFromCounters(machine *ParseStateMachine) map[string]*Stack
 			Addend:  set.Skip.Addend,
 		}
 	}
-	return out
+	return out, nil
 }
 
 // counterSetOp returns the CounterOpSet for the named counter, or nil.
