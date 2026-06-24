@@ -15,8 +15,8 @@ header mpls_h {
 // EtherType identifies the *payload* protocol, independent of the
 // outer L2 carrier.
 const bit<16> KUNAI_MPLS_ETH_ETHERTYPE  = 0x8847;
-const bit<16> MPLS_VLAN_ETHERTYPE = 0x8847;
-const bit<16> MPLS_QINQ_ETHERTYPE = 0x8847;
+const bit<16> KUNAI_MPLS_VLAN_ETHERTYPE = 0x8847;
+const bit<16> KUNAI_MPLS_QINQ_ETHERTYPE = 0x8847;
 
 // Stacked MPLS labels: the next label sits immediately after the
 // previous one with no boundary marker. The user opts in by writing

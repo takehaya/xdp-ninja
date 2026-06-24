@@ -30,11 +30,11 @@ header ipv6_ext_h {
 
 // Ethernet/VLAN/QinQ select ipv6 via the ethertype.
 const bit<16> KUNAI_IPV6_ETH_ETHERTYPE  = 0x86DD;
-const bit<16> IPV6_VLAN_ETHERTYPE = 0x86DD;
-const bit<16> IPV6_QINQ_ETHERTYPE = 0x86DD;
+const bit<16> KUNAI_IPV6_VLAN_ETHERTYPE = 0x86DD;
+const bit<16> KUNAI_IPV6_QINQ_ETHERTYPE = 0x86DD;
 
 // Under GRE, dispatch on the EtherType-shaped protocol_type field.
-const bit<16> IPV6_GRE_PROTOCOL_TYPE = 0x86DD;
+const bit<16> KUNAI_IPV6_GRE_PROTOCOL_TYPE = 0x86DD;
 
 // IPv6-in-IPv6 tunneling (RFC 2473): the outer ipv6's next_header is
 // 41 (IANA "IPv6"). Lets users write `eth/ipv6/ipv6/tcp` for v6-in-v6

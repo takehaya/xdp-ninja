@@ -46,12 +46,12 @@ header ipv4_rr_addr_h {
 
 // Ethernet/VLAN/QinQ select ipv4 via the ethertype.
 const bit<16> KUNAI_IPV4_ETH_ETHERTYPE  = 0x0800;
-const bit<16> IPV4_VLAN_ETHERTYPE = 0x0800;
-const bit<16> IPV4_QINQ_ETHERTYPE = 0x0800;
+const bit<16> KUNAI_IPV4_VLAN_ETHERTYPE = 0x0800;
+const bit<16> KUNAI_IPV4_QINQ_ETHERTYPE = 0x0800;
 
 // SRv6 transports IPv4-in-IPv6 (SRv6 → IPv4 inner): the SRH
 // next_header byte uses IANA protocol number 4 (IPIP).
-const bit<8>  IPV4_SRV6_NEXT_HEADER = 4;
+const bit<8>  KUNAI_IPV4_SRV6_NEXT_HEADER = 4;
 
 // IPv4-in-IPv4 tunneling (IPIP, RFC 2003): the outer ipv4's protocol
 // byte is 4 (IANA "IPIP"). Lets users write `eth/ipv4/ipv4/tcp` to
@@ -62,7 +62,7 @@ const bit<8>  KUNAI_IPV4_IPV4_PROTOCOL = 4;
 
 // Under GRE, the protocol_type field carries the EtherType of the
 // payload — IPv4 uses the well-known 0x0800.
-const bit<16> IPV4_GRE_PROTOCOL_TYPE = 0x0800;
+const bit<16> KUNAI_IPV4_GRE_PROTOCOL_TYPE = 0x0800;
 
 // Option-walk loop bound: worst-case trailer is 40 bytes (IHL=15)
 // of NOPs (kind=1, single byte), so up to 40 iterations would drain

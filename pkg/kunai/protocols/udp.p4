@@ -11,7 +11,7 @@ const bit<8> KUNAI_UDP_IPV4_PROTOCOL    = 17;
 const bit<8> KUNAI_UDP_IPV6_NEXT_HEADER = 17;
 
 // SRv6 dispatches to UDP via SRH.next_header.
-const bit<8> UDP_SRV6_NEXT_HEADER = 17;
+const bit<8> KUNAI_UDP_SRV6_NEXT_HEADER = 17;
 
 parser UdpParser(packet_in pkt, out udp_h hdr) {
     state start {
