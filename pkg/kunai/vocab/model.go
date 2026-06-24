@@ -430,7 +430,9 @@ type DispatchType int
 
 const (
 	// DispatchField: parent has an identifying field (e.g. ipv4.protocol),
-	// named as <SELF>_<PARENT>_<FIELD> = value.
+	// named as KUNAI_<SELF>_<PARENT>_<FIELD> = value (the KUNAI_ namespace
+	// prefix is optional; <PARENT> must be a real protocol or the const is
+	// folded into the select arm as a value-only match instead).
 	DispatchField DispatchType = iota
 	// DispatchNoCheck: blind cast, user-declared trust (e.g. Ethernet
 	// payload of MPLS in EoMPLS), named as <SELF>_<PARENT>_NO_CHECK = true.

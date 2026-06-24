@@ -29,7 +29,7 @@ header ipv6_ext_h {
 }
 
 // Ethernet/VLAN/QinQ select ipv6 via the ethertype.
-const bit<16> IPV6_ETH_ETHERTYPE  = 0x86DD;
+const bit<16> KUNAI_IPV6_ETH_ETHERTYPE  = 0x86DD;
 const bit<16> IPV6_VLAN_ETHERTYPE = 0x86DD;
 const bit<16> IPV6_QINQ_ETHERTYPE = 0x86DD;
 
@@ -41,13 +41,14 @@ const bit<16> IPV6_GRE_PROTOCOL_TYPE = 0x86DD;
 // tunnels without resorting to a chain quantifier — each ipv6 layer
 // runs its own parser machine, so ext headers on either layer are
 // handled correctly.
-const bit<8>  IPV6_IPV6_NEXT_HEADER = 41;
+const bit<8>  KUNAI_IPV6_IPV6_NEXT_HEADER = 41;
 
 // IPv6 extension-header next_header values (IANA protocol numbers)
-// that the parser chains into ext parsing. KUNAI_ marks them as
-// value-only consts: the loader folds each into the matching select
-// arm and assigns no inter-layer dispatch role (these dispatch to the
-// same protocol's own ext walk, not to a child layer).
+// that the parser chains into ext parsing. KUNAI_ is the namespace
+// prefix for named consts; these are value-only (no inter-layer
+// dispatch role) because their parent token NH is not a protocol, so
+// the loader folds each into the matching select arm (they dispatch to
+// the same protocol's own ext walk, not to a child layer).
 const bit<8>  KUNAI_IPV6_NH_HOP_BY_HOP = 0;  // Hop-by-Hop Options (RFC 8200)
 const bit<8>  KUNAI_IPV6_NH_FRAGMENT   = 44; // Fragment (RFC 8200)
 const bit<8>  KUNAI_IPV6_NH_DEST_OPTS  = 60; // Destination Options (RFC 8200)

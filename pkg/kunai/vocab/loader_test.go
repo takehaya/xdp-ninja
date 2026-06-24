@@ -37,9 +37,9 @@ func TestLoadBundledCount(t *testing.T) {
 func TestLoadMplsDispatch(t *testing.T) {
 	mpls := loadBundled(t)["mpls"]
 	dc := indexByName(mpls.Consts)
-	eth, ok := dc["MPLS_ETH_ETHERTYPE"]
+	eth, ok := dc["KUNAI_MPLS_ETH_ETHERTYPE"]
 	if !ok || eth.Type != DispatchField || eth.Parent != "eth" || eth.Value != 0x8847 {
-		t.Errorf("MPLS_ETH_ETHERTYPE = %+v", eth)
+		t.Errorf("KUNAI_MPLS_ETH_ETHERTYPE = %+v", eth)
 	}
 	stack, ok := dc["MPLS_MPLS_NO_CHECK"]
 	if !ok || stack.Type != DispatchNoCheck || !stack.Bool {
@@ -73,31 +73,31 @@ func TestLoadBundledNoPhantomParserDispatch(t *testing.T) {
 func TestLoadGreDispatch(t *testing.T) {
 	gre := loadBundled(t)["gre"]
 	dc := indexByName(gre.Consts)
-	v4, ok := dc["GRE_IPV4_PROTOCOL"]
+	v4, ok := dc["KUNAI_GRE_IPV4_PROTOCOL"]
 	if !ok || v4.Parent != "ipv4" || v4.Value != 47 {
-		t.Errorf("GRE_IPV4_PROTOCOL = %+v", v4)
+		t.Errorf("KUNAI_GRE_IPV4_PROTOCOL = %+v", v4)
 	}
 }
 
 func TestLoadVxlanGenevePorts(t *testing.T) {
 	vxlan := loadBundled(t)["vxlan"]
-	if dc, ok := indexByName(vxlan.Consts)["VXLAN_UDP_DPORT"]; !ok || dc.Value != 4789 {
-		t.Errorf("VXLAN_UDP_DPORT = %+v", dc)
+	if dc, ok := indexByName(vxlan.Consts)["KUNAI_VXLAN_UDP_DPORT"]; !ok || dc.Value != 4789 {
+		t.Errorf("KUNAI_VXLAN_UDP_DPORT = %+v", dc)
 	}
 	geneve := loadBundled(t)["geneve"]
-	if dc, ok := indexByName(geneve.Consts)["GENEVE_UDP_DPORT"]; !ok || dc.Value != 6081 {
-		t.Errorf("GENEVE_UDP_DPORT = %+v", dc)
+	if dc, ok := indexByName(geneve.Consts)["KUNAI_GENEVE_UDP_DPORT"]; !ok || dc.Value != 6081 {
+		t.Errorf("KUNAI_GENEVE_UDP_DPORT = %+v", dc)
 	}
 }
 
 func TestLoadVlanDispatchConstants(t *testing.T) {
 	vlan := loadBundled(t)["vlan"]
-	dc, ok := indexByName(vlan.Consts)["VLAN_ETH_ETHERTYPE"]
+	dc, ok := indexByName(vlan.Consts)["KUNAI_VLAN_ETH_ETHERTYPE"]
 	if !ok {
-		t.Fatal("VLAN_ETH_ETHERTYPE not found")
+		t.Fatal("KUNAI_VLAN_ETH_ETHERTYPE not found")
 	}
 	if dc.Type != DispatchField || dc.Parent != "eth" || dc.Value != 0x8100 {
-		t.Errorf("VLAN_ETH_ETHERTYPE = %+v", dc)
+		t.Errorf("KUNAI_VLAN_ETH_ETHERTYPE = %+v", dc)
 	}
 }
 
@@ -221,9 +221,9 @@ func TestLoadIpv4DispatchClassification(t *testing.T) {
 
 func TestLoadGtpUdpDport(t *testing.T) {
 	gtp := loadBundled(t)["gtp"]
-	dc, ok := indexByName(gtp.Consts)["GTP_UDP_DPORT"]
+	dc, ok := indexByName(gtp.Consts)["KUNAI_GTP_UDP_DPORT"]
 	if !ok {
-		t.Fatal("GTP_UDP_DPORT not found")
+		t.Fatal("KUNAI_GTP_UDP_DPORT not found")
 	}
 	if dc.Type != DispatchField || dc.Parent != "udp" || dc.FieldName != "dport" || dc.Value != 2152 {
 		t.Errorf("const = %+v", dc)
@@ -244,8 +244,8 @@ func TestLoadTcpDispatchClassification(t *testing.T) {
 		field     string
 		value     uint64
 	}{
-		{"TCP_IPV4_PROTOCOL", DispatchField, "ipv4", "protocol", 6},
-		{"TCP_IPV6_NEXT_HEADER", DispatchField, "ipv6", "next_header", 6},
+		{"KUNAI_TCP_IPV4_PROTOCOL", DispatchField, "ipv4", "protocol", 6},
+		{"KUNAI_TCP_IPV6_NEXT_HEADER", DispatchField, "ipv6", "next_header", 6},
 	}
 	for _, tc := range cases {
 		dc, ok := byName[tc.constName]

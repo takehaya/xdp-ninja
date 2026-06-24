@@ -6,7 +6,7 @@ header vlan_h {
 }
 
 // VLAN is carried inside Ethernet (or QinQ, below) via ethertype=0x8100.
-const bit<16> VLAN_ETH_ETHERTYPE  = 0x8100;
+const bit<16> KUNAI_VLAN_ETH_ETHERTYPE  = 0x8100;
 const bit<16> VLAN_QINQ_ETHERTYPE = 0x8100;
 
 // Self-stacked VLAN: an inner tag is marked by the outer VLAN's own

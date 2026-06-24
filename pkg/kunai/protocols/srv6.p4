@@ -51,13 +51,14 @@ header srv6_seg_h {
 // (next_header == 43). The IPv6 parser block deliberately omits 43
 // from its ext-set so users opt into SRv6 by writing it as a
 // distinct chain element (e.g. `eth/ipv6/srv6/tcp`).
-const bit<8> SRV6_IPV6_NEXT_HEADER = 43;
+const bit<8> KUNAI_SRV6_IPV6_NEXT_HEADER = 43;
 
 // routing_type 4 identifies SRH (RFC 8754 Section 2). Named so the
 // start-state select arm reads as KUNAI_SRV6_ROUTING_TYPE rather than a
-// bare 4. The KUNAI_ prefix marks a value-only const (no inter-layer
-// dispatch role): the loader folds it into the select arm and never
-// treats it as a dispatch edge.
+// bare 4. KUNAI_ is the namespace prefix for these named consts; this
+// one is value-only (no inter-layer dispatch role) because its parent
+// token ROUTING is not a protocol: the loader folds it into the select
+// arm and never treats it as a dispatch edge.
 const bit<8> KUNAI_SRV6_ROUTING_TYPE = 4;
 
 extern ParserCounter {

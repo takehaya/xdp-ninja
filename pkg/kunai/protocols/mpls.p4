@@ -14,7 +14,7 @@ header mpls_h {
 // MPLS rides under VLAN and QinQ with the same 0x8847 because the
 // EtherType identifies the *payload* protocol, independent of the
 // outer L2 carrier.
-const bit<16> MPLS_ETH_ETHERTYPE  = 0x8847;
+const bit<16> KUNAI_MPLS_ETH_ETHERTYPE  = 0x8847;
 const bit<16> MPLS_VLAN_ETHERTYPE = 0x8847;
 const bit<16> MPLS_QINQ_ETHERTYPE = 0x8847;
 

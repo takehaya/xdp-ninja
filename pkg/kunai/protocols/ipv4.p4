@@ -45,7 +45,7 @@ header ipv4_rr_addr_h {
 }
 
 // Ethernet/VLAN/QinQ select ipv4 via the ethertype.
-const bit<16> IPV4_ETH_ETHERTYPE  = 0x0800;
+const bit<16> KUNAI_IPV4_ETH_ETHERTYPE  = 0x0800;
 const bit<16> IPV4_VLAN_ETHERTYPE = 0x0800;
 const bit<16> IPV4_QINQ_ETHERTYPE = 0x0800;
 
@@ -58,7 +58,7 @@ const bit<8>  IPV4_SRV6_NEXT_HEADER = 4;
 // match IPIP frames without resorting to a chain quantifier — each
 // ipv4 layer runs its own parser machine, so IHL>5 / options on the
 // inner ipv4 are handled correctly.
-const bit<8>  IPV4_IPV4_PROTOCOL = 4;
+const bit<8>  KUNAI_IPV4_IPV4_PROTOCOL = 4;
 
 // Under GRE, the protocol_type field carries the EtherType of the
 // payload — IPv4 uses the well-known 0x0800.
@@ -88,8 +88,9 @@ const bit<16> IPV4_GRE_PROTOCOL_TYPE = 0x0800;
 // loop entirely.
 
 // IPv4 option kinds dispatched by the walk state (RFC 791 §3.1).
-// KUNAI_ marks these as value-only consts: the loader folds each into
-// the matching select arm and gives them no inter-layer dispatch role.
+// KUNAI_ is the namespace prefix for named consts; these are value-only
+// (no inter-layer dispatch role) because their parent token OPT is not
+// a protocol, so the loader folds each into the matching select arm.
 // EOL/NOP are the single-byte options; Record Route and Router Alert
 // are the extracted ones.
 const bit<8> KUNAI_IPV4_OPT_EOL          = 0;   // End of Option List (RFC 791)
